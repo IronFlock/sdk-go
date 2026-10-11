@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"encoding"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/RecordEvolution/ironflock-go/internal/finite"
 	"github.com/RecordEvolution/ironflock-go/internal/jsontext"
@@ -91,19 +93,45 @@ func normalizeKwargs(kw Kwargs) (map[string]any, error) {
 // memory with v.
 //
 // Structs, maps, slices, arrays, pointers and interfaces are converted by the
-// rules of encoding/json, so a value has the shape json.Marshal would give it:
-// struct fields are named by their json tags, with the "-", omitempty,
-// omitzero and ",string" options and the rules for embedded structs; map keys
-// are strings, integers (as decimal strings) or encoding.TextMarshalers; a
-// nil slice, map or pointer, Row(nil) included, becomes nil (JSON null), not
-// an empty list or object; a value with a MarshalJSON or MarshalText method
-// is encoded through it (the JSON a MarshalJSON method returns is decoded, a
-// number written as an integer becoming int64, or uint64 above
-// math.MaxInt64, any other float64), the method called wherever
-// encoding/json calls it: a method with a pointer receiver only on an
-// addressable value, and any on a nil pointer held in an interface of the
-// method's type (a field of type json.Marshaler, say); strings are coerced
-// to valid UTF-8, each invalid byte becoming U+FFFD.
+// rules of encoding/json as of Go 1.27, which runs it on the json/v2 engine
+// with the options that keep v1's behavior, so a value has the shape
+// json.Marshal would give it:
+//
+//   - Struct fields are named by their json tags (a name ends at the first
+//     comma, backslash or quote), with the "-", omitempty, omitzero, ",string"
+//     and ",embed" options and the rules for embedded structs. An unnamed
+//     field tagged ",embed" adds a struct's fields, or the members of a map
+//     with string keys or of a json.RawMessage, to the struct's own; such a
+//     member named like a field wins, as a decoder keeps the later of the
+//     two encoding/json writes. A struct with a field tagged with a
+//     "format:" option is refused.
+//   - The ",string" option applies to the field's value, also behind one
+//     pointer, named or not; not through an interface or a second pointer,
+//     nor to the elements of a container.
+//   - A map key becomes the object key encoding/json makes of it: a string
+//     as it is, an integer or float as its JSON number, a value whose
+//     AppendText or MarshalText method encoding/json calls (never
+//     MarshalJSON for a key) as its text, a key behind a pointer or in an
+//     interface as what it points to or holds, and a nil pointer key of a
+//     type with MarshalText or AppendText as "". A key that is no string —
+//     a bool, a struct or array without those methods, a nil pointer or
+//     interface, a float64 in an interface{} key — fails, so only an empty
+//     map of such a key type can be sent.
+//   - A nil slice, map or pointer, Row(nil) included, becomes nil (JSON
+//     null), not an empty list or object.
+//   - A value with a MarshalJSONTo, MarshalJSON, AppendText or MarshalText
+//     method is encoded through the first of them encoding/json calls (the
+//     JSON a method returns is decoded, a number written as an integer
+//     becoming int64, or uint64 above math.MaxInt64, any other float64): a
+//     method with a pointer receiver only on an addressable value, and none
+//     on a nil pointer, except that a nil pointer held in an interface of
+//     type json.Marshaler, encoding.TextAppender, encoding.TextMarshaler or
+//     encoding/json/v2's MarshalerTo (a field of that type, say) is encoded
+//     through that method.
+//   - Strings are coerced to valid UTF-8, each invalid byte becoming U+FFFD.
+//   - Objects and arrays nested more than 10000 deep fail, counted as
+//     encoding/json counts them (not an empty slice or map).
+//
 // Unlike encoding/json:
 //
 //   - Floats stay float64, NaN and ±Inf included, as the Python SDK sends
@@ -121,13 +149,20 @@ func normalizeKwargs(kw Kwargs) (map[string]any, error) {
 //     encoding/json encodes it). Map keys naming the same instant become one
 //     entry, the one encoding/json would write last. The Python and
 //     JavaScript SDKs send their timestamps in UTC too.
+//   - A struct with an unexported embedded struct named by its tag whose
+//     marshal or unmarshal method (or IsZero, with omitzero), its own or its
+//     pointer's, cannot be called on it is refused with an error naming the
+//     field: encoding/json leaves such a field out, silently dropping its
+//     data.
 //
 // Like encoding/json, normalize fails on channels, functions, complex
-// numbers, maps with other key types, and values that contain themselves.
-// Where encoding/json panics, normalize does not: it fails on a method it
-// could only call through an unexported embedded field, and sends nil (as a
-// map key, "") where a method called on a nil pointer, or promoted through a
-// nil embedded pointer or interface, fails with a run-time error on it.
+// numbers and values that contain themselves. Where encoding/json panics,
+// normalize does not: it sends nil (as a map key, "") where a method called
+// on a nil pointer, or promoted through a nil embedded pointer or interface,
+// fails with a run-time error on it, and for a nil pointer held in an
+// interface of any other type with a marshal method; and it fails on a value
+// that contains itself through pointers and interfaces only (encoding/json
+// recurses until the stack overflows).
 func normalize(v any) (any, error) {
 	var e encoder
 	return e.anyValue(v)
@@ -139,10 +174,14 @@ func normalize(v any) (any, error) {
 // encoding/json's startDetectingCyclesAfter.
 const trackDepth = 1000
 
+// maxNesting is how deeply encoding/json nests objects and arrays.
+const maxNesting = 10000
+
 // encoder carries the state of one normalize walk.
 type encoder struct {
-	depth int              // pointers, maps and slices entered
-	path  map[any]struct{} // those on the current path, once deeper than trackDepth
+	depth  int              // pointers, maps and slices entered
+	path   map[any]struct{} // those on the current path, once deeper than trackDepth
+	nested int              // objects and arrays open, as encoding/json counts them
 }
 
 // anyValue converts v, a value held in an interface: common payload types
@@ -188,8 +227,7 @@ func (e *encoder) anyValue(v any) (any, error) {
 		return e.list(x)
 	}
 	// A value held in an interface is not addressable: as for encoding/json,
-	// a MarshalJSON or MarshalText method with a pointer receiver is not
-	// used for it.
+	// a method with a pointer receiver is not used for it.
 	return e.value(reflect.ValueOf(v), false)
 }
 
@@ -209,6 +247,8 @@ func (e *encoder) value(v reflect.Value, quoted bool) (any, error) {
 	switch t {
 	case timeType:
 		return timeString(v)
+	case numberType: // its MarshalJSONTo method writes the number
+		return numberValue(v.String(), quoted)
 	case anyMapType: // e.g. the rows of a []Row: no reflection needed
 		if v.CanInterface() {
 			return e.stringMap(v.Interface().(map[string]any))
@@ -219,11 +259,8 @@ func (e *encoder) value(v reflect.Value, quoted bool) (any, error) {
 		}
 	}
 	ti := infoOf(t)
-	if ti.marshalJSON == valueMethod || ti.marshalJSON == pointerMethod && v.CanAddr() {
-		return marshal(v, ti.marshalJSON, false)
-	}
-	if ti.marshalText == valueMethod || ti.marshalText == pointerMethod && v.CanAddr() {
-		return marshal(v, ti.marshalText, true)
+	if kind, how := ti.use(v.CanAddr(), false); kind != noKind {
+		return e.marshal(v, kind, how)
 	}
 	switch v.Kind() {
 	case reflect.Bool:
@@ -244,9 +281,6 @@ func (e *encoder) value(v reflect.Value, quoted bool) (any, error) {
 	case reflect.Float32, reflect.Float64:
 		return floatValue(v.Float(), t.Bits(), quoted)
 	case reflect.String:
-		if t == numberType {
-			return numberValue(v.String(), quoted)
-		}
 		if quoted {
 			// The JSON encoding of the string, as a string.
 			b, _ := json.Marshal(v.String())
@@ -254,7 +288,7 @@ func (e *encoder) value(v reflect.Value, quoted bool) (any, error) {
 		}
 		return jsontext.ValidUTF8(v.String()), nil
 	case reflect.Struct:
-		return e.structValue(v, ti.fields)
+		return e.structValue(v, ti)
 	case reflect.Map:
 		return e.mapValue(v, ti)
 	case reflect.Slice:
@@ -268,19 +302,21 @@ func (e *encoder) value(v reflect.Value, quoted bool) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		out, err := e.elems(v)
+		out, err := e.elems(v, v.Len() > 0)
 		e.leave(key)
 		return out, err
 	case reflect.Array:
-		return e.elems(v)
+		return e.elems(v, true)
 	}
 	return nil, failf("unsupported type %s", t)
 }
 
-// pointer converts the pointer v: nil, or the value it points to. A method
-// encoding/json would call on the pointer is called on that value, which is
-// addressable.
+// pointer converts the pointer v: nil, or the value it points to, which is
+// addressable. The ",string" option reaches through one pointer only.
 func (e *encoder) pointer(v reflect.Value, quoted bool) (any, error) {
+	if quoted && v.Type().Elem().Kind() == reflect.Pointer {
+		quoted = false
+	}
 	if v.IsNil() {
 		return nil, nil
 	}
@@ -293,29 +329,47 @@ func (e *encoder) pointer(v reflect.Value, quoted bool) (any, error) {
 	return out, err
 }
 
-// iface converts v, a value of interface type.
+// iface converts v, a value of interface type: what it holds, taken as a
+// value that is not addressable. A nil pointer in an interface whose type
+// has a marshal method is encoded as encoding/json encodes it.
 func (e *encoder) iface(v reflect.Value) (any, error) {
 	if v.IsNil() {
 		return nil, nil
 	}
-	ti := infoOf(v.Type())
-	if ti.marshalJSON == noMethod && ti.marshalText == noMethod {
-		if !v.CanInterface() {
-			return e.value(v.Elem(), false)
+	if elem := v.Elem(); elem.Kind() == reflect.Pointer && elem.IsNil() {
+		switch kind := wrapperOf(v.Type()); kind {
+		case noKind: // a nil pointer, as anywhere else
+		case kindJSONTo:
+			return e.marshalNilTo(v)
+		case kindJSON, kindAppend, kindText:
+			// encoding/json calls the interface's method on the nil pointer.
+			return e.marshal(v, kind, valueMethod)
+		default:
+			// The interface type has marshal methods but is none of those:
+			// encoding/json panics.
+			return nil, nil
 		}
-		return e.anyValue(v.Interface())
 	}
-	// The interface type is a json.Marshaler or encoding.TextMarshaler itself
-	// (a field of type json.Marshaler, say): encoding/json calls that method
-	// on whatever is inside, a nil pointer included.
-	return marshal(v, valueMethod, ti.marshalJSON == noMethod)
+	if !v.CanInterface() {
+		return e.value(v.Elem(), false)
+	}
+	return e.anyValue(v.Elem().Interface())
 }
 
-// structValue converts the struct v, whose encoded fields are fields.
-func (e *encoder) structValue(v reflect.Value, fields []structField) (any, error) {
-	out := make(map[string]any, len(fields))
-	for i := range fields {
-		f := &fields[i]
+// structValue converts the struct v, of a type described by ti.
+func (e *encoder) structValue(v reflect.Value, ti *typeInfo) (any, error) {
+	switch {
+	case ti.leftOut != "":
+		return nil, failf("%s: %w", ti.leftOut, errLeftOut)
+	case ti.refused != "":
+		return nil, failf("%s", ti.refused)
+	}
+	if err := e.open(); err != nil {
+		return nil, err
+	}
+	out := make(map[string]any, len(ti.fields))
+	for i := range ti.fields {
+		f := &ti.fields[i]
 		fv, ok := fieldByIndex(v, f.index)
 		if !ok {
 			continue
@@ -343,14 +397,68 @@ func (e *encoder) structValue(v reflect.Value, fields []structField) (any, error
 		}
 		out[f.name] = val
 	}
+	if ti.fallback != nil {
+		if err := e.fallback(v, ti.fallback, out); err != nil {
+			return nil, err
+		}
+	}
+	e.close()
 	return out, nil
+}
+
+// fallback adds the members of the struct v's embedded fallback field f (a
+// map with string keys or a jsontext.Value tagged ",embed") to out, the
+// struct's object. encoding/json writes them after the fields, so a member
+// named like a field is the one a decoder keeps.
+func (e *encoder) fallback(v reflect.Value, f *structField, out map[string]any) error {
+	fv, ok := fieldByIndex(v, f.index)
+	if !ok {
+		return nil
+	}
+	if fv.Kind() == reflect.Pointer {
+		if fv.IsNil() {
+			return nil
+		}
+		fv = fv.Elem()
+	}
+	if f.raw {
+		b := fv.Bytes()
+		if len(b) == 0 {
+			return nil
+		}
+		raw, depth, err := fromJSONText(b)
+		if err != nil {
+			return failf("invalid embedded JSON: %v", err)
+		}
+		members, ok := raw.(map[string]any)
+		if !ok {
+			return failf("embedded JSON is %s, not an object", shape(raw))
+		}
+		if e.nested+depth-1 > maxNesting {
+			return errNesting()
+		}
+		for k, val := range members {
+			out[k] = val
+		}
+		return nil
+	}
+	obj := newObject(fv.Len())
+	for it := fv.MapRange(); it.Next(); {
+		k := it.Key().String()
+		val, err := e.value(it.Value(), false)
+		if err != nil {
+			return at(err, keySegment(k))
+		}
+		obj.set(k, val)
+	}
+	for k, val := range obj.m {
+		out[k] = val
+	}
+	return nil
 }
 
 // mapValue converts the map v, of a type described by ti.
 func (e *encoder) mapValue(v reflect.Value, ti *typeInfo) (any, error) {
-	if !ti.keysOK {
-		return nil, failf("unsupported type %s", v.Type())
-	}
 	if v.IsNil() {
 		return nil, nil
 	}
@@ -358,9 +466,15 @@ func (e *encoder) mapValue(v reflect.Value, ti *typeInfo) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	obj := newObject(v.Len())
+	n := v.Len()
+	if n > 0 {
+		if err := e.open(); err != nil {
+			return nil, err
+		}
+	}
+	obj := newObject(n)
 	for it := v.MapRange(); it.Next(); {
-		k, orig, err := keyName(it.Key())
+		k, orig, err := e.key(it.Key(), ti.nilKey)
 		if err != nil {
 			return nil, err
 		}
@@ -369,6 +483,9 @@ func (e *encoder) mapValue(v reflect.Value, ti *typeInfo) (any, error) {
 			return nil, at(err, keySegment(k))
 		}
 		obj.setAs(orig, jsontext.ValidUTF8(k), val)
+	}
+	if n > 0 {
+		e.close()
 	}
 	e.leave(key)
 	return obj.m, nil
@@ -386,6 +503,11 @@ func (e *encoder) stringMap(m map[string]any) (any, error) {
 			return nil, err
 		}
 	}
+	if len(m) > 0 {
+		if err := e.open(); err != nil {
+			return nil, err
+		}
+	}
 	obj := newObject(len(m))
 	for k, x := range m {
 		val, err := e.anyValue(x)
@@ -393,6 +515,9 @@ func (e *encoder) stringMap(m map[string]any) (any, error) {
 			return nil, at(err, keySegment(k))
 		}
 		obj.set(k, val)
+	}
+	if len(m) > 0 {
+		e.close()
 	}
 	e.leave(key)
 	return obj.m, nil
@@ -410,6 +535,11 @@ func (e *encoder) list(s []any) (any, error) {
 			return nil, err
 		}
 	}
+	if len(s) > 0 {
+		if err := e.open(); err != nil {
+			return nil, err
+		}
+	}
 	out := make([]any, len(s))
 	for i, x := range s {
 		val, err := e.anyValue(x)
@@ -418,12 +548,22 @@ func (e *encoder) list(s []any) (any, error) {
 		}
 		out[i] = val
 	}
+	if len(s) > 0 {
+		e.close()
+	}
 	e.leave(key)
 	return out, nil
 }
 
-// elems converts the elements of the slice or array v.
-func (e *encoder) elems(v reflect.Value) ([]any, error) {
+// elems converts the elements of the slice or array v. open says whether
+// encoding/json counts the array it writes for them against maxNesting (it
+// does not for an empty slice).
+func (e *encoder) elems(v reflect.Value, open bool) ([]any, error) {
+	if open {
+		if err := e.open(); err != nil {
+			return nil, err
+		}
+	}
 	out := make([]any, v.Len())
 	for i := range out {
 		val, err := e.value(v.Index(i), false)
@@ -432,7 +572,27 @@ func (e *encoder) elems(v reflect.Value) ([]any, error) {
 		}
 		out[i] = val
 	}
+	if open {
+		e.close()
+	}
 	return out, nil
+}
+
+// open is called before converting an object or array encoding/json counts
+// against maxNesting; close after it. open fails if the object or array is
+// nested too deeply.
+func (e *encoder) open() error {
+	if e.nested >= maxNesting {
+		return errNesting()
+	}
+	e.nested++
+	return nil
+}
+
+func (e *encoder) close() { e.nested-- }
+
+func errNesting() error {
+	return failf("objects and arrays are nested more than %d deep", maxNesting)
 }
 
 // enter is called before descending into the pointer, map or slice v; the
@@ -504,44 +664,129 @@ func fieldByIndex(v reflect.Value, index []int) (reflect.Value, bool) {
 	return v, true
 }
 
-// keyName returns the object key the map key k is sent as: the key
-// encoding/json makes of it, except that a time.Time key — also behind a
-// pointer, in an interface, or embedded in the key type (see callMarshaler)
-// — is in UTC, as a time.Time value is. orig is the key encoding/json makes
-// of it, which decides between keys that come out the same.
-func keyName(k reflect.Value) (key, orig string, err error) {
-	if k.Kind() == reflect.String {
-		return k.String(), k.String(), nil
-	}
-	if k.CanInterface() {
-		x := k.Interface()
-		if _, ok := x.(encoding.TextMarshaler); ok {
-			if k.Kind() == reflect.Pointer && k.IsNil() {
+// key returns the object key the map key k is sent as: the key encoding/json
+// makes of it, except that a time.Time key — also behind a pointer, in an
+// interface, or embedded in the key type (see callMarshaler) — is in UTC, as
+// a time.Time value is. orig is the key encoding/json makes of it, which
+// decides between keys that come out the same. nilKey says that a nil key is
+// "": encoding/json writes that for a nil key of a pointer type with a
+// MarshalText or AppendText method.
+func (e *encoder) key(k reflect.Value, nilKey bool) (key, orig string, err error) {
+	switch k.Kind() {
+	case reflect.Pointer:
+		if k.IsNil() {
+			if nilKey {
 				return "", "", nil
 			}
-			m, err := callMarshaler(x, true)
-			switch {
-			case err != nil:
-				return "", "", failf("error calling MarshalText for a map key of type %s: %v", k.Type(), err)
-			case m.isNil:
-				return "", "", nil // as for a nil pointer key
-			case m.isTime:
-				return utc(m.t), m.t.Format(time.RFC3339Nano), nil
-			}
-			return string(m.b), string(m.b), nil
+			return "", "", failf("unsupported map key: a nil %s", k.Type())
 		}
-	} else if k.Type().Implements(textMarshalerType) {
-		return "", "", unreachableMethod(k.Type(), "MarshalText")
+		ek, err := e.enter(k)
+		if err != nil {
+			return "", "", err
+		}
+		key, orig, err = e.key(k.Elem(), false) // addressable
+		e.leave(ek)
+		return key, orig, err
+	case reflect.Interface:
+		return e.ifaceKey(k)
+	}
+	t := k.Type()
+	if t == timeType {
+		if !k.CanInterface() {
+			return "", "", unreachableMethod(t, "MarshalText")
+		}
+		tm := k.Interface().(time.Time)
+		return utc(tm), tm.Format(time.RFC3339Nano), nil
+	}
+	ti := infoOf(t)
+	if k.Kind() != reflect.String { // a string key is taken as it is
+		if kind, how := ti.use(k.CanAddr(), true); kind != noKind {
+			return keyText(k, kind, how)
+		}
 	}
 	switch k.Kind() {
+	case reflect.String:
+		return k.String(), k.String(), nil
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		s := strconv.FormatInt(k.Int(), 10)
 		return s, s, nil
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		s := strconv.FormatUint(k.Uint(), 10)
 		return s, s, nil
+	case reflect.Float32, reflect.Float64:
+		f := k.Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return "", "", failf("unsupported map key %s", strconv.FormatFloat(f, 'g', -1, t.Bits()))
+		}
+		// The JSON number encoding/json writes for the float.
+		var b []byte
+		if t.Bits() == 32 {
+			b, _ = json.Marshal(float32(f))
+		} else {
+			b, _ = json.Marshal(f)
+		}
+		return string(b), string(b), nil
+	case reflect.Slice: // only reached through a pointer key
+		if ti.bytes {
+			if k.IsNil() {
+				return "", "", failf("unsupported map key: a nil %s", t)
+			}
+			s := base64.StdEncoding.EncodeToString(k.Bytes())
+			return s, s, nil
+		}
 	}
-	return "", "", failf("unsupported map key type %s", k.Type())
+	return "", "", failf("unsupported map key type %s", t)
+}
+
+// ifaceKey is key for a map key of interface type.
+func (e *encoder) ifaceKey(k reflect.Value) (key, orig string, err error) {
+	if k.IsNil() {
+		return "", "", failf("unsupported map key: a nil %s", k.Type())
+	}
+	elem := k.Elem()
+	if elem.Kind() == reflect.Pointer && elem.IsNil() {
+		switch kind := wrapperOf(k.Type()); kind {
+		case noKind:
+		case kindAppend, kindText:
+			return keyText(k, kind, valueMethod) // called on the nil pointer
+		case kindJSONTo, kindJSON:
+			// The struct encoding/json wraps the pointer in to call the method
+			// (which it never calls for a key) is no string.
+			return "", "", failf("unsupported map key: a nil %s in a %s", elem.Type(), k.Type())
+		default:
+			return "", "", nil // encoding/json panics
+		}
+	}
+	if k.Type() == anyType && elem.Type() == float64Type {
+		// encoding/json writes a float64 in an interface{} as a JSON number,
+		// which cannot be a key.
+		return "", "", failf("unsupported map key %v: a float64 in an %s key", elem.Float(), k.Type())
+	}
+	return e.key(elem, false)
+}
+
+// keyText returns the key the map key k is sent as, and the one
+// encoding/json makes of it, through its AppendText or MarshalText method;
+// how says whether the method is called on k or on k's address.
+func keyText(k reflect.Value, kind methodKind, how method) (key, orig string, err error) {
+	name := methodNames[kind]
+	if !k.CanInterface() {
+		return "", "", unreachableMethod(k.Type(), name)
+	}
+	rcv := k
+	if how == pointerMethod {
+		rcv = k.Addr()
+	}
+	m, err := callMarshaler(rcv.Interface(), kind)
+	switch {
+	case err != nil:
+		return "", "", failf("error calling %s for a map key of type %s: %v", name, k.Type(), err)
+	case m.isNil:
+		return "", "", nil // as for a nil pointer key
+	case m.isTime:
+		return utc(m.t), m.t.Format(time.RFC3339Nano), nil
+	}
+	return string(m.b), string(m.b), nil
 }
 
 // object builds the map[string]any a map converts to. Its keys are coerced
@@ -659,15 +904,11 @@ func isNumberLiteral(s string) bool {
 		'0' <= s[len(s)-1] && s[len(s)-1] <= '9' && json.Valid([]byte(s))
 }
 
-// marshal encodes v through its MarshalJSON method, or through its
-// MarshalText method if text is set, as encoding/json does (see
-// callMarshaler); how says whether the method is called on v or on v's
+// marshal encodes v through the marshal method kind, as encoding/json does
+// (see callMarshaler); how says whether the method is called on v or on v's
 // address. For v of interface type, it is the method of the value inside.
-func marshal(v reflect.Value, how method, text bool) (any, error) {
-	name := "MarshalJSON"
-	if text {
-		name = "MarshalText"
-	}
+func (e *encoder) marshal(v reflect.Value, kind methodKind, how method) (any, error) {
+	name := methodNames[kind]
 	if !v.CanInterface() {
 		return nil, unreachableMethod(v.Type(), name)
 	}
@@ -675,21 +916,52 @@ func marshal(v reflect.Value, how method, text bool) (any, error) {
 	if how == pointerMethod {
 		rcv = v.Addr()
 	}
-	m, err := callMarshaler(rcv.Interface(), text)
+	m, err := callMarshaler(rcv.Interface(), kind)
 	if err != nil {
 		return nil, failf("error calling %s for type %s: %v", name, v.Type(), err)
 	}
+	return e.marshaled(m, kind, v.Type())
+}
+
+// marshalNilTo encodes v, an interface of type json/v2's MarshalerTo holding
+// a nil pointer, as encoding/json does: through the method, called on the
+// nil pointer. json.Marshal calls it on a field of that type.
+func (e *encoder) marshalNilTo(v reflect.Value) (any, error) {
+	holder := reflect.New(reflect.StructOf([]reflect.StructField{{Name: "V", Type: v.Type()}})).Elem()
+	holder.Field(0).Set(v)
+	b, isNil, err := call(holder.Interface(), kindJSONTo, func() bool { return true })
+	if isNil {
+		return nil, nil
+	}
+	if err == nil {
+		var fields struct{ V json.RawMessage }
+		if err = json.Unmarshal(b, &fields); err == nil {
+			b = fields.V
+		}
+	}
+	if err != nil {
+		return nil, failf("error calling MarshalJSONTo for type %s: %v", v.Type(), err)
+	}
+	return e.marshaled(marshaled{b: b}, kindJSONTo, v.Type())
+}
+
+// marshaled converts what a marshal method of kind encoded a value of type
+// t as.
+func (e *encoder) marshaled(m marshaled, kind methodKind, t reflect.Type) (any, error) {
 	switch {
 	case m.isNil:
 		return nil, nil
 	case m.isTime:
 		return utc(m.t), nil
-	case text:
+	case kind == kindAppend || kind == kindText:
 		return jsontext.ValidUTF8(string(m.b)), nil
 	}
-	out, err := fromJSONText(m.b)
+	out, depth, err := fromJSONText(m.b)
 	if err != nil {
-		return nil, failf("error calling MarshalJSON for type %s: %v", v.Type(), err)
+		return nil, failf("error calling %s for type %s: %v", methodNames[kind], t, err)
+	}
+	if e.nested+depth > maxNesting {
+		return nil, errNesting()
 	}
 	return out, nil
 }
@@ -703,8 +975,8 @@ type marshaled struct {
 	isNil  bool
 }
 
-// callMarshaler calls the MarshalJSON method of x, or its MarshalText method
-// if text is set, as encoding/json calls it, except that:
+// callMarshaler calls the marshal method kind of x as encoding/json calls
+// it, except that:
 //
 //   - A time.Time or *time.Time comes back as the time, to be sent in UTC.
 //     So does a value whose method returns just what the method of the
@@ -718,7 +990,7 @@ type marshaled struct {
 //     does not say whether a method is promoted, a run-time error while an
 //     embedded pointer or interface that has the method is nil is taken as
 //     one. Any other panic is passed on, as encoding/json passes it on.
-func callMarshaler(x any, text bool) (marshaled, error) {
+func callMarshaler(x any, kind methodKind) (marshaled, error) {
 	switch t := x.(type) {
 	case time.Time:
 		return marshaled{t: t, isTime: true}, nil
@@ -728,21 +1000,14 @@ func callMarshaler(x any, text bool) (marshaled, error) {
 		}
 		return marshaled{t: *t, isTime: true}, nil
 	}
-	iface, ok := marshalerType, false
-	if text {
-		iface = textMarshalerType
-		_, ok = x.(encoding.TextMarshaler)
-	} else {
-		_, ok = x.(json.Marshaler)
-	}
-	if !ok {
+	if x == nil || methodOf(reflect.TypeOf(x), kind) != valueMethod {
 		return marshaled{isNil: true}, nil // encoding/json writes null
 	}
 	var nilRcv func() bool // whether a run-time error is the method failing on a nil pointer
 	v := reflect.ValueOf(x)
 	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {
-			if v.Type().Elem().Implements(iface) {
+			if methodOf(v.Type().Elem(), kind) == valueMethod {
 				// A method of the type pointed to: called on the nil pointer,
 				// it panics whatever it does.
 				return marshaled{isNil: true}, nil
@@ -759,13 +1024,13 @@ func callMarshaler(x any, text bool) (marshaled, error) {
 			nilRcv = func() bool { return nilOn(v, ti.nilable) }
 		}
 	}
-	b, isNil, err := call(x, text, nilRcv)
+	b, isNil, err := call(x, kind, nilRcv)
 	if isNil {
 		return marshaled{isNil: true}, nil
 	}
-	if ti != nil && ti.timeIndex != nil {
+	if ti != nil && ti.timeIndex != nil && kind != kindJSONTo {
 		if t, ok := timeAt(v, ti.timeIndex); ok {
-			tb, _, terr := call(t, text, nil)
+			tb, _, terr := call(t, kind, nil)
 			if bytes.Equal(b, tb) && sameError(err, terr) {
 				return marshaled{t: t, isTime: true}, nil
 			}
@@ -774,11 +1039,10 @@ func callMarshaler(x any, text bool) (marshaled, error) {
 	return marshaled{b: b}, err
 }
 
-// call calls the MarshalJSON method of x, or its MarshalText method if text
-// is set. With nilRcv, a run-time error the method panics with, if nilRcv
-// says a nil pointer is involved, makes it report isNil instead; any other
-// panic is passed on.
-func call(x any, text bool, nilRcv func() bool) (b []byte, isNil bool, err error) {
+// call calls the marshal method kind of x. With nilRcv, a run-time error the
+// method panics with, if nilRcv says a nil pointer is involved, makes it
+// report isNil instead; any other panic is passed on.
+func call(x any, kind methodKind, nilRcv func() bool) (b []byte, isNil bool, err error) {
 	if nilRcv != nil {
 		defer func() {
 			if r := recover(); r != nil {
@@ -789,10 +1053,19 @@ func call(x any, text bool, nilRcv func() bool) (b []byte, isNil bool, err error
 			}
 		}()
 	}
-	if text {
-		b, err = x.(encoding.TextMarshaler).MarshalText()
-	} else {
+	switch kind {
+	case kindJSONTo:
+		// The method takes a jsontext.Encoder: let json.Marshal call it.
+		b, err = json.Marshal(x)
+		if me, ok := errors.AsType[*json.MarshalerError](err); ok {
+			err = me.Err
+		}
+	case kindJSON:
 		b, err = x.(json.Marshaler).MarshalJSON()
+	case kindAppend:
+		b, err = x.(encoding.TextAppender).AppendText(nil)
+	default:
+		b, err = x.(encoding.TextMarshaler).MarshalText()
 	}
 	return b, false, err
 }
@@ -845,19 +1118,19 @@ func nilOn(v reflect.Value, indexes [][]int) bool {
 }
 
 // fromJSONText decodes the JSON text b, converting numbers as fromJSON does.
-func fromJSONText(b []byte) (any, error) {
+// depth is how deeply b nests objects and arrays.
+func fromJSONText(b []byte) (out any, depth int, err error) {
 	if !json.Valid(b) {
 		var discard any
 		if err := json.Unmarshal(b, &discard); err != nil {
-			return nil, err // says what is wrong where
+			return nil, 0, err // says what is wrong where
 		}
-		return nil, errors.New("invalid JSON")
+		return nil, 0, errors.New("invalid JSON")
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
-	var out any
 	if err := dec.Decode(&out); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	return fromJSON(out)
 }
@@ -872,31 +1145,33 @@ func unsigned(u uint64) any {
 }
 
 // fromJSON converts a value decoded with json.Decoder.UseNumber, turning
-// numbers into int64 when integral and float64 otherwise.
-func fromJSON(v any) (any, error) {
+// numbers into int64 when integral and float64 otherwise. depth is how
+// deeply v nests objects and arrays.
+func fromJSON(v any) (out any, depth int, err error) {
 	switch x := v.(type) {
 	case json.Number:
-		return jsonNumber(x)
+		n, err := jsonNumber(x)
+		return n, 0, err
 	case []any:
 		for i, e := range x {
-			n, err := fromJSON(e)
+			n, d, err := fromJSON(e)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
-			x[i] = n
+			x[i], depth = n, max(depth, d)
 		}
-		return x, nil
+		return x, depth + 1, nil
 	case map[string]any:
 		for k, e := range x {
-			n, err := fromJSON(e)
+			n, d, err := fromJSON(e)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
-			x[k] = n
+			x[k], depth = n, max(depth, d)
 		}
-		return x, nil
+		return x, depth + 1, nil
 	default:
-		return x, nil
+		return x, 0, nil
 	}
 }
 
@@ -918,14 +1193,39 @@ func jsonNumber(n json.Number) (any, error) {
 }
 
 var (
+	anyType           = reflect.TypeFor[any]()
+	float64Type       = reflect.TypeFor[float64]()
+	errorType         = reflect.TypeFor[error]()
 	marshalerType     = reflect.TypeFor[json.Marshaler]()
+	textAppenderType  = reflect.TypeFor[encoding.TextAppender]()
 	textMarshalerType = reflect.TypeFor[encoding.TextMarshaler]()
 	isZeroerType      = reflect.TypeFor[interface{ IsZero() bool }]()
 	timeType          = reflect.TypeFor[time.Time]()
 	numberType        = reflect.TypeFor[json.Number]()
 	anyMapType        = reflect.TypeFor[map[string]any]()
 	anySliceType      = reflect.TypeFor[[]any]()
+	// The other interfaces of encoding/json's marshal and unmarshal methods.
+	otherMethodTypes = []reflect.Type{
+		reflect.TypeFor[json.Unmarshaler](),
+		reflect.TypeFor[encoding.TextUnmarshaler](),
+	}
 )
+
+// methodKind names a marshal method encoding/json calls.
+type methodKind uint8
+
+const (
+	noKind     methodKind = iota
+	kindJSONTo            // MarshalJSONTo(*jsontext.Encoder) error, of encoding/json/v2
+	kindJSON              // MarshalJSON
+	kindAppend            // AppendText
+	kindText              // MarshalText
+	kindOther             // of an interface type with one of them that is not their interface
+)
+
+// methodNames are the names of the methods of each kind, in the order
+// encoding/json prefers them.
+var methodNames = [...]string{kindJSONTo: "MarshalJSONTo", kindJSON: "MarshalJSON", kindAppend: "AppendText", kindText: "MarshalText"}
 
 // method says how a type has the method of an interface.
 type method uint8
@@ -936,9 +1236,25 @@ const (
 	pointerMethod        // only the pointer type does: usable on an addressable value
 )
 
-// methodOf says how the type t (not a pointer type) has the method of the
-// interface type iface.
-func methodOf(t, iface reflect.Type) method {
+// methodOf says how the type t (not a pointer type) has the marshal method
+// kind.
+func methodOf(t reflect.Type, kind methodKind) method {
+	switch kind {
+	case kindJSONTo:
+		return methodSig(t, "MarshalJSONTo", "Encoder")
+	case kindJSON:
+		return implementation(t, marshalerType)
+	case kindAppend:
+		return implementation(t, textAppenderType)
+	case kindText:
+		return implementation(t, textMarshalerType)
+	}
+	return noMethod
+}
+
+// implementation says how the type t has the method of the interface type
+// iface.
+func implementation(t, iface reflect.Type) method {
 	switch {
 	case t.Implements(iface):
 		return valueMethod
@@ -948,17 +1264,125 @@ func methodOf(t, iface reflect.Type) method {
 	return noMethod
 }
 
+// methodSig is implementation for an interface of encoding/json/v2, which
+// this package does not import (it exists only in builds with the jsonv2
+// experiment, on by default): the method name(*jsontext.<param>) error.
+func methodSig(t reflect.Type, name, param string) method {
+	has := func(t reflect.Type) bool {
+		m, ok := t.MethodByName(name)
+		if !ok {
+			return false
+		}
+		in := 1 // the receiver
+		if t.Kind() == reflect.Interface {
+			in = 0
+		}
+		ft := m.Type
+		if ft.NumIn() != in+1 || ft.NumOut() != 1 || ft.Out(0) != errorType {
+			return false
+		}
+		p := ft.In(in)
+		return p.Kind() == reflect.Pointer && p.Elem().PkgPath() == "encoding/json/jsontext" && p.Elem().Name() == param
+	}
+	switch {
+	case has(t):
+		return valueMethod
+	case t.Kind() != reflect.Pointer && t.Kind() != reflect.Interface && has(reflect.PointerTo(t)):
+		return pointerMethod
+	}
+	return noMethod
+}
+
+// hasMarshalMethod reports whether t or *t has one of the marshal methods.
+func hasMarshalMethod(t reflect.Type) bool {
+	for kind := kindJSONTo; kind <= kindText; kind++ {
+		if methodOf(t, kind) != noMethod {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAnyMethod reports whether t or *t has one of encoding/json's marshal
+// or unmarshal methods.
+func hasAnyMethod(t reflect.Type) bool { return anyMethod(t) != "" }
+
+// anyMethod returns the name of one of encoding/json's marshal or unmarshal
+// methods t or *t has, "" if it has none.
+func anyMethod(t reflect.Type) string {
+	for kind := kindJSONTo; kind <= kindText; kind++ {
+		if methodOf(t, kind) != noMethod {
+			return methodNames[kind]
+		}
+	}
+	if methodSig(t, "UnmarshalJSONFrom", "Decoder") != noMethod {
+		return "UnmarshalJSONFrom"
+	}
+	for _, iface := range otherMethodTypes {
+		if implementation(t, iface) != noMethod {
+			return iface.Method(0).Name
+		}
+	}
+	return ""
+}
+
+// errLeftOut is the error for a struct field encoding/json leaves out
+// although it holds data: an unexported embedded struct named by its tag
+// whose methods it cannot call. normalize refuses the struct instead.
+var errLeftOut = errors.New("encoding/json would leave it out, dropping its data")
+
+// wrapperOf says, for the interface type t, through which method
+// encoding/json encodes a nil pointer the interface holds: the method of t
+// when t is the interface of one, kindOther when t has a marshal method but
+// is none of them (encoding/json panics), and noKind when t has none (the
+// pointer is null).
+func wrapperOf(t reflect.Type) methodKind {
+	switch {
+	case t == marshalerType:
+		return kindJSON
+	case t == textAppenderType:
+		return kindAppend
+	case t == textMarshalerType:
+		return kindText
+	case t.PkgPath() == "encoding/json/v2" && t.Name() == "MarshalerTo":
+		return kindJSONTo
+	case hasMarshalMethod(t):
+		return kindOther
+	}
+	return noKind
+}
+
 // typeInfo is what the walk needs to know about a type (other than a pointer
-// type), worked out once per type.
+// or interface type), worked out once per type.
 type typeInfo struct {
-	marshalJSON method        // how the type has MarshalJSON
-	marshalText method        // how the type has MarshalText
-	bytes       bool          // a slice type sent as []byte
-	keysOK      bool          // a map type whose key type encoding/json accepts
-	fields      []structField // the fields of a struct type that are encoded
-	// Of a struct type with MarshalJSON or MarshalText (see promotedFrom):
+	methods [kindText + 1]method // how the type has each marshal method
+	bytes   bool                 // a slice type sent as []byte
+	nilKey  bool                 // a map type whose nil pointer keys encoding/json writes as ""
+	// Of a struct type:
+	fields   []structField // the fields that are encoded
+	fallback *structField  // the embedded fallback field, if any
+	refused  string        // why encoding/json refuses the type, if it does
+	leftOut  string        // a field encoding/json leaves out but normalize does not (see structFields)
+	// Of a struct type with marshal methods (see promotedFrom):
 	timeIndex []int   // the embedded time.Time that may have promoted them
 	nilable   [][]int // the embedded pointers and interfaces they may be promoted through
+}
+
+// use returns the marshal method encoding/json encodes a value of the type
+// through, noKind if none, and how the type has it: the first method of
+// methodNames it has, with a pointer receiver only if addressable, and for a
+// map key (key) no MarshalJSONTo or MarshalJSON.
+func (ti *typeInfo) use(addressable, key bool) (methodKind, method) {
+	first := kindJSONTo
+	if key {
+		first = kindAppend
+	}
+	for kind := first; kind <= kindText; kind++ {
+		if m := ti.methods[kind]; m == valueMethod || m == pointerMethod && addressable {
+			return kind, m
+		}
+	}
+	return noKind, noMethod
 }
 
 var typeInfos sync.Map // reflect.Type → *typeInfo
@@ -972,41 +1396,34 @@ func infoOf(t reflect.Type) *typeInfo {
 }
 
 func newTypeInfo(t reflect.Type) *typeInfo {
-	ti := &typeInfo{
-		marshalJSON: methodOf(t, marshalerType),
-		marshalText: methodOf(t, textMarshalerType),
+	ti := &typeInfo{}
+	if t.Kind() != reflect.Pointer && t.Kind() != reflect.Interface {
+		for kind := kindJSONTo; kind <= kindText; kind++ {
+			ti.methods[kind] = methodOf(t, kind)
+		}
 	}
 	switch t.Kind() {
 	case reflect.Slice:
 		// A []byte, or a slice of a byte type without marshal methods.
-		if t.Elem().Kind() == reflect.Uint8 {
-			p := reflect.PointerTo(t.Elem())
-			ti.bytes = !p.Implements(marshalerType) && !p.Implements(textMarshalerType)
-		}
+		ti.bytes = t.Elem().Kind() == reflect.Uint8 && !hasMarshalMethod(t.Elem())
 	case reflect.Map:
-		switch t.Key().Kind() {
-		case reflect.String,
-			reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
-			ti.keysOK = true
-		default:
-			ti.keysOK = t.Key().Implements(textMarshalerType)
-		}
+		k := t.Key()
+		ti.nilKey = k.Kind() == reflect.Pointer && (k.Implements(textMarshalerType) || k.Implements(textAppenderType))
 	case reflect.Struct:
-		ti.fields = structFields(t)
-		if ti.marshalJSON != noMethod || ti.marshalText != noMethod {
+		ti.fields, ti.fallback, ti.refused, ti.leftOut = structFields(t)
+		if ti.methods != [len(ti.methods)]method{} {
 			ti.timeIndex, ti.nilable = promotedFrom(t)
 		}
 	}
 	return ti
 }
 
-// promotedFrom works out where the struct type t may have its MarshalJSON
-// and MarshalText methods from, by Go's rules for promoted methods. A method
-// is promoted from the shallowest depth at which t embeds a type that has
-// it — directly, or through embedded structs — if only one type has it
-// there; a method t declares itself comes first. reflect does not say where
-// a method comes from, so the result is what can be told from the fields:
+// promotedFrom works out where the struct type t may have its marshal
+// methods from, by Go's rules for promoted methods. A method is promoted
+// from the shallowest depth at which t embeds a type that has it — directly,
+// or through embedded structs — if only one type has it there; a method t
+// declares itself comes first. reflect does not say where a method comes
+// from, so the result is what can be told from the fields:
 //
 //   - timeIndex is the index sequence of the time.Time (or *time.Time) t
 //     embeds at the shallowest depth it embeds one at, if it embeds only one
@@ -1043,7 +1460,7 @@ func promotedFrom(t reflect.Type) (timeIndex []int, nilable [][]int) {
 				ft := sf.Type
 				switch ft.Kind() {
 				case reflect.Pointer, reflect.Interface:
-					if ft.Implements(marshalerType) || ft.Implements(textMarshalerType) {
+					if hasMarshalMethod(ft) {
 						nilable = append(nilable, index)
 					}
 				}
@@ -1068,174 +1485,273 @@ func promotedFrom(t reflect.Type) (timeIndex []int, nilable [][]int) {
 	return timeIndex, nilable
 }
 
-// structField is a struct field the walk encodes.
-type structField struct {
-	name      string
-	tagged    bool  // the name comes from the json tag
-	index     []int // the field's index sequence, through embedded structs
+// fieldOptions are the options of a struct field's json tag, read as
+// encoding/json reads them.
+type fieldOptions struct {
+	name      string // the name of the object member
+	hasName   bool   // the name comes from the tag
+	embed     bool   // the field's members are the struct's own (embedding, or the "embed" option)
 	omitEmpty bool
 	omitZero  bool
-	quoted    bool // the ",string" option, on a field whose kind takes it
+	quoted    bool   // the "string" option
+	format    string // the value of a "format:" option
+	casing    bool   // a "case:" option, which marshaling ignores
+}
+
+// structField is a struct field the walk encodes.
+type structField struct {
+	fieldOptions
+	index []int // the field's index sequence, through embedded structs
+	raw   bool  // an embedded fallback of type jsontext.Value
 	// isZero is the omitzero test through the field type's IsZero method,
 	// nil for a type without one (reflect.Value.IsZero is used then).
 	isZero func(reflect.Value) (bool, error)
 }
 
 // structFields returns the fields encoding/json encodes for the struct type
-// t, in field order. It mirrors encoding/json's typeFields: the exported
-// fields, and those of embedded structs (also through unexported embedded
-// struct types and embedded pointers) unless the embedded field has a name
-// in its tag, named by their json tag or else their Go name; fields tagged
-// "-" are left out. Of several fields with the same name, the least nested
-// one wins; at the same depth a tagged one wins over untagged ones; when
-// that does not single one out, all of them are left out.
-func structFields(t reflect.Type) []structField {
-	type embedded struct {
-		typ   reflect.Type
-		index []int
+// t, in field order, its embedded fallback field (a map with string keys or
+// a jsontext.Value tagged ",embed", whose members are added to the struct's),
+// and why encoding/json refuses t ("" if it does not). It mirrors
+// encoding/json/v2's makeStructFields, a breadth-first walk through embedded
+// structs (also unexported ones, and pointers to them) that are not named by
+// a tag: the exported fields, named by their json tag or else their Go name,
+// and tagged unexported embedded structs without marshal or unmarshal
+// methods; fields tagged "-" are left out. leftOut describes a tagged
+// unexported embedded struct with such a method (or IsZero, with omitzero),
+// which encoding/json leaves out and normalize refuses. Of several fields with the same
+// name, the least nested one wins; at the same depth a tagged one wins over
+// untagged ones; when that does not single one out, all of them are left out.
+func structFields(root reflect.Type) (fields []structField, fallback *structField, refused, leftOut string) {
+	type queued struct {
+		typ           reflect.Type
+		index         []int
+		visitChildren bool // whether to queue the structs this one embeds
 	}
-	var (
-		fields           []structField
-		current, next    = []embedded{}, []embedded{{typ: t}}
-		count, nextCount map[reflect.Type]int // how often each struct is embedded at the current and next depth
-		visited          = map[reflect.Type]bool{}
-	)
-	for len(next) > 0 {
-		current, next = next, current[:0]
-		count, nextCount = nextCount, map[reflect.Type]int{}
-		for _, s := range current {
-			if visited[s.typ] {
+	queue := []queued{{root, nil, true}}
+	seen := map[reflect.Type]bool{root: true}
+	var all, fallbacks []structField
+	for qi := 0; qi < len(queue); qi++ {
+		q := queue[qi]
+		for i := range q.typ.NumField() {
+			sf := q.typ.Field(i)
+			opts, ignored := parseFieldTag(sf)
+			if ignored {
 				continue
 			}
-			visited[s.typ] = true
-			for i := range s.typ.NumField() {
-				sf := s.typ.Field(i)
-				if sf.Anonymous {
-					et := sf.Type
-					if et.Kind() == reflect.Pointer {
-						et = et.Elem()
+			f := structField{fieldOptions: opts, index: append(slices.Clip(q.index), i)}
+			tf := sf.Type
+			if tf.Kind() == reflect.Pointer && tf.Name() == "" {
+				tf = tf.Elem()
+			}
+			if sf.Anonymous && !f.hasName && tf.Kind() == reflect.Struct {
+				f.embed = true
+			}
+			// field adds f as a field of its own.
+			field := func() {
+				if !sf.IsExported() {
+					if !sf.Anonymous || tf.Kind() != reflect.Struct {
+						return
 					}
-					if !sf.IsExported() && et.Kind() != reflect.Struct {
-						continue // nothing to promote from an unexported non-struct type
+					// Methods cannot be called on an unexported field:
+					// encoding/json leaves it out, and normalize refuses the
+					// struct rather than drop the field's data.
+					name := anyMethod(tf)
+					if name == "" && f.omitZero && implementation(tf, isZeroerType) != noMethod {
+						name = "IsZero"
 					}
-				} else if !sf.IsExported() {
-					continue
-				}
-				tag := sf.Tag.Get("json")
-				if tag == "-" {
-					continue
-				}
-				name, opts, _ := strings.Cut(tag, ",")
-				if !isValidTag(name) {
-					name = ""
-				}
-				index := append(slices.Clip(s.index), i)
-				ft := sf.Type
-				if ft.Name() == "" && ft.Kind() == reflect.Pointer {
-					ft = ft.Elem()
-				}
-				if name == "" && sf.Anonymous && ft.Kind() == reflect.Struct {
-					// An embedded struct: its fields are promoted, one depth down.
-					if nextCount[ft]++; nextCount[ft] == 1 {
-						next = append(next, embedded{typ: ft, index: index})
+					if name != "" {
+						if leftOut == "" {
+							leftOut = fmt.Sprintf("field %s of %s is an unexported embedded struct with a %s method, which cannot be called on it", sf.Name, q.typ, name)
+						}
+						return
 					}
-					continue
-				}
-				f := structField{
-					name:      name,
-					tagged:    name != "",
-					index:     index,
-					omitEmpty: hasOption(opts, "omitempty"),
-					omitZero:  hasOption(opts, "omitzero"),
-					quoted:    hasOption(opts, "string") && quotable(ft.Kind()),
-				}
-				if f.name == "" {
-					f.name = sf.Name
 				}
 				if f.omitZero {
 					f.isZero = zeroFunc(sf.Type)
 				}
-				fields = append(fields, f)
-				if count[s.typ] > 1 {
-					// The struct is embedded more than once at this depth: a
-					// second copy of the field makes it ambiguous below.
-					fields = append(fields, f)
+				all = append(all, f)
+				if f.format != "" && refused == "" {
+					refused = fmt.Sprintf("encoding/json does not support the \"format\" tag option of field %s of %s", sf.Name, q.typ)
 				}
 			}
+			if !f.embed {
+				field()
+				continue
+			}
+			if f.hasName || f.omitEmpty || f.omitZero || f.quoted || f.format != "" || f.casing {
+				if f.hasName { // a named field after all
+					field()
+					continue
+				}
+				f.fieldOptions = fieldOptions{name: f.name, embed: true} // the other options are ignored
+			}
+			switch {
+			case tf.Kind() == reflect.Struct:
+				if q.visitChildren {
+					queue = append(queue, queued{tf, f.index, !seen[tf]})
+				}
+				seen[tf] = true
+				continue
+			case !sf.IsExported():
+				continue
+			case tf.PkgPath() == "encoding/json/jsontext" && tf.Name() == "Value":
+				f.raw = true
+			case tf.Kind() == reflect.Map && tf.Key().Kind() == reflect.String && !hasAnyMethod(tf.Key()):
+			default:
+				field()
+				continue
+			}
+			fallbacks = append(fallbacks, f)
 		}
 	}
 	// Sort by name, then least nested first, then tagged first.
-	slices.SortFunc(fields, func(a, b structField) int {
-		if c := strings.Compare(a.name, b.name); c != 0 {
-			return c
-		}
-		if c := cmp.Compare(len(a.index), len(b.index)); c != 0 {
-			return c
-		}
-		if a.tagged != b.tagged {
-			if a.tagged {
-				return -1
-			}
-			return 1
-		}
-		return slices.Compare(a.index, b.index)
+	slices.SortStableFunc(all, func(a, b structField) int {
+		return cmp.Or(strings.Compare(a.name, b.name), cmp.Compare(len(a.index), len(b.index)), boolsCompare(!a.hasName, !b.hasName))
 	})
-	out := fields[:0]
-	for i := 0; i < len(fields); {
-		j := i + 1
-		for j < len(fields) && fields[j].name == fields[i].name {
-			j++
+	for len(all) > 0 {
+		n := 1
+		for n < len(all) && all[n].name == all[0].name {
+			n++
 		}
-		// fields[i] wins its name unless fields[i+1] is as nested and as tagged.
-		if j == i+1 || len(fields[i].index) != len(fields[i+1].index) || fields[i].tagged != fields[i+1].tagged {
-			out = append(out, fields[i])
+		// all[0] wins its name unless all[1] is as nested and as tagged.
+		if n == 1 || len(all[0].index) != len(all[1].index) || all[0].hasName != all[1].hasName {
+			fields = append(fields, all[0])
 		}
-		i = j
+		all = all[n:]
 	}
-	slices.SortFunc(out, func(a, b structField) int { return slices.Compare(a.index, b.index) })
-	return out
+	slices.SortFunc(fields, func(a, b structField) int { return slices.Compare(a.index, b.index) })
+	if n := len(fallbacks); n == 1 || n > 1 && len(fallbacks[0].index) != len(fallbacks[1].index) {
+		fallback = &fallbacks[0]
+	}
+	return fields, fallback, refused, leftOut
 }
 
-// isValidTag reports whether s can name a field: encoding/json's rule.
-func isValidTag(s string) bool {
-	if s == "" {
-		return false
+// boolsCompare orders false before true.
+func boolsCompare(a, b bool) int {
+	switch {
+	case !a && b:
+		return -1
+	case a && !b:
+		return 1
 	}
-	for _, c := range s {
-		switch {
-		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
-			// Backslash and quote characters are reserved, but other
-			// punctuation is allowed in a field name.
-		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
-			return false
-		}
-	}
-	return true
+	return 0
 }
 
-// hasOption reports whether the comma-separated tag options opts include name.
-func hasOption(opts, name string) bool {
-	for opts != "" {
-		var o string
-		o, opts, _ = strings.Cut(opts, ",")
-		if o == name {
-			return true
+// parseFieldTag reads the json tag of the struct field sf as encoding/json
+// reads it (its parseFieldOptions, without the errors it ignores for v1).
+// ignored reports a field that is not encoded: tagged "-", or unexported and
+// not embedded.
+func parseFieldTag(sf reflect.StructField) (o fieldOptions, ignored bool) {
+	tag := sf.Tag.Get("json")
+	if tag == "-" || !sf.IsExported() && !sf.Anonymous {
+		return o, true
+	}
+	o.name = sf.Name
+	if tag != "" && tag[0] != ',' {
+		// The name runs up to a comma, backslash or quote; if one of the
+		// latter follows it, the name is the identifier it starts with.
+		n := len(tag) - len(strings.TrimLeftFunc(tag, func(r rune) bool { return !strings.ContainsRune(",\\'\"`", r) }))
+		name, ok := tag[:n], true
+		if !strings.HasPrefix(tag[n:], ",") && n != len(tag) {
+			name, n, ok = tagOption(tag, false)
+		}
+		if ok {
+			o.name, o.hasName = string([]rune(name)), true // invalid UTF-8 becomes U+FFFD
+		}
+		tag = tag[n:]
+	}
+	for tag != "" {
+		if tag[0] == ',' {
+			if tag = tag[1:]; tag == "" {
+				break
+			}
+		}
+		opt, n, _ := tagOption(tag, false)
+		tag = tag[n:]
+		switch opt {
+		case "case":
+			if !strings.HasPrefix(tag, ":") {
+				break
+			}
+			tag = tag[1:]
+			value, n, ok := tagOption(tag, false)
+			if !ok {
+				break
+			}
+			tag = tag[n:]
+			o.casing = o.casing || value == "ignore" || value == "strict"
+		case "embed":
+			o.embed = true
+		case "omitzero":
+			o.omitZero = true
+		case "omitempty":
+			o.omitEmpty = true
+		case "string":
+			o.quoted = true
+		case "format":
+			if !strings.HasPrefix(tag, ":") {
+				break
+			}
+			tag = tag[1:]
+			value, n, ok := tagOption(tag, true)
+			if !ok || value == "" {
+				break
+			}
+			tag = tag[n:]
+			o.format = value
 		}
 	}
-	return false
+	return o, false
 }
 
-// quotable reports whether the ",string" option applies to a field of kind k.
-func quotable(k reflect.Kind) bool {
-	switch k {
-	case reflect.Bool,
-		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
-		reflect.Float32, reflect.Float64,
-		reflect.String:
-		return true
+// tagOption consumes the next tag option at the start of in: a Go
+// identifier or, if quoted is set, a single-quoted string. n is how much of
+// in it takes; if the option is invalid, ok is false and it takes all of in
+// up to the next comma.
+func tagOption(in string, quoted bool) (opt string, n int, ok bool) {
+	i := strings.IndexByte(in, ',')
+	if i < 0 {
+		i = len(in)
 	}
-	return false
+	switch r, _ := utf8.DecodeRuneInString(in); {
+	case r == '_' || unicode.IsLetter(r):
+		n := len(in) - len(strings.TrimLeftFunc(in, isLetterOrDigit))
+		return in[:n], n, true
+	case r == '\'' && quoted:
+		// Like a double-quoted Go string literal, in single quotes.
+		var escaped bool
+		b := []byte{'"'}
+		n := len(`'`)
+		for len(in) > n {
+			r, size := utf8.DecodeRuneInString(in[n:])
+			switch {
+			case escaped:
+				if r == '\'' {
+					b = b[:len(b)-1] // `\'` is `'`
+				}
+				escaped = false
+			case r == '\\':
+				escaped = true
+			case r == '"':
+				b = append(b, '\\')
+			case r == '\'':
+				b = append(b, '"')
+				n += len(`'`)
+				out, err := strconv.Unquote(string(b))
+				if err != nil {
+					return in[:i], i, false
+				}
+				return out, n, true
+			}
+			b = append(b, in[n:][:size]...)
+			n += size
+		}
+	}
+	return in[:i], i, false
+}
+
+func isLetterOrDigit(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r)
 }
 
 // isEmptyValue is encoding/json's omitempty test.
@@ -1369,11 +1885,11 @@ func isIdentifier(s string) bool {
 func indexSegment(i int) string { return "[" + strconv.Itoa(i) + "]" }
 
 // unreachableMethod is the error for a method encoding/json would call (or a
-// time.Time it would read) on a value it can only reach through an
-// unexported embedded field; reflection cannot do that, and encoding/json
-// panics.
+// time.Time it would read) on a value reflection reaches only through an
+// unexported field and cannot call it on. encoding/json leaves such fields
+// out, so the walk is not expected to meet one.
 func unreachableMethod(t reflect.Type, name string) error {
-	return failf("cannot call %s of %s: it is reached through an unexported embedded field", name, t)
+	return failf("cannot call %s of %s: it is reached through an unexported field", name, t)
 }
 
 // normalizeRows validates a bulk batch — a non-empty slice or array whose
@@ -1429,8 +1945,9 @@ func describeRow(row, n any) string {
 	return v.Type().String()
 }
 
-// marshalMethod returns the name of the method normalize encodes v through,
-// MarshalJSON or MarshalText, or "" if it uses none.
+// marshalMethod returns the name of the method normalize encodes v through
+// (MarshalJSONTo, MarshalJSON, AppendText or MarshalText), or "" if it uses
+// none.
 func marshalMethod(v reflect.Value) string {
 	addressable := false
 	for v.Kind() == reflect.Pointer {
@@ -1439,14 +1956,14 @@ func marshalMethod(v reflect.Value) string {
 		}
 		v, addressable = v.Elem(), true
 	}
-	ti := infoOf(v.Type())
-	switch {
-	case ti.marshalJSON == valueMethod || ti.marshalJSON == pointerMethod && addressable:
+	switch v.Type() {
+	case timeType:
 		return "MarshalJSON"
-	case ti.marshalText == valueMethod || ti.marshalText == pointerMethod && addressable:
-		return "MarshalText"
+	case numberType:
+		return "MarshalJSONTo"
 	}
-	return ""
+	kind, _ := infoOf(v.Type()).use(addressable, false)
+	return methodNames[kind]
 }
 
 // shape names what kind of value n, a normalized value, is.

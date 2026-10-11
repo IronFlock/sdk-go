@@ -636,8 +636,10 @@ func TestNormalizeRows(t *testing.T) {
 		{[]*sensorRow{nil}, "row at index 0 must be a map or struct, got a nil *ironflock.sensorRow"},
 		{[]Row{{"cb": func() {}}}, "row at index 0: cb: unsupported type func()"},
 		{[][]float64{{1}}, "row at index 0 must be a map or struct, got []float64"},
-		{[]map[bool]string{{true: ""}}, "row at index 0: unsupported type map[bool]string"},
-		{[]map[int]string{{1: "a"}}, ""}, // integer keys become strings: a row
+		{[]map[bool]string{{true: ""}}, "row at index 0: unsupported map key type bool"},
+		{[]map[bool]string{{}}, ""},       // no key to encode: an empty row, as for encoding/json
+		{[]map[int]string{{1: "a"}}, ""},  // integer keys become strings: a row
+		{[]map[float64]int{{1.5: 1}}, ""}, // so do float keys
 		{[2]*sensorRow{{}, {}}, ""},
 	} {
 		_, err := normalizeRows(c.rows)

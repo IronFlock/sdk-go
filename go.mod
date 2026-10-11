@@ -1,9 +1,9 @@
 module github.com/RecordEvolution/ironflock-go
 
-go 1.25.0
+go 1.27.2
 
 require (
-	github.com/ironflock/nexus/v3 v3.0.0-20261009145435-09c793f70120
+	github.com/ironflock/nexus/v3 v3.4.2
 	github.com/ugorji/go/codec v1.3.1
 )
 

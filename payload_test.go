@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
@@ -483,12 +485,18 @@ func TestNormalizeRejectsCycles(t *testing.T) {
 	type holder struct {
 		M map[string]any `json:"m"`
 	}
+	// encoding/json recurses on this one until the stack overflows: it
+	// detects cycles only among objects and arrays.
+	var self any
+	self = &self
 	for name, in := range map[string]any{
-		"pointer":          n,
-		"map[string]any":   m,
-		"[]any":            s,
-		"struct with map":  holder{M: m},
-		"Row inside []any": []any{Row{"m": m}},
+		"pointer":                            n,
+		"map[string]any":                     m,
+		"[]any":                              s,
+		"struct with map":                    holder{M: m},
+		"Row inside []any":                   []any{Row{"m": m}},
+		"pointer to an interface holding it": &self,
+		"map key pointing to itself":         map[pjSelfKey]int{pjSelfKeyLoop(): 1},
 	} {
 		_, err := normalize(in)
 		if err == nil || !strings.Contains(err.Error(), "cycle") {
@@ -525,7 +533,12 @@ func TestNormalizeErrorsSayWhere(t *testing.T) {
 		{pjRawJSON("1 2"), "error calling MarshalJSON for type ironflock.pjRawJSON: invalid character '2' after top-level value"},
 		{[]pjFailText{{}}, "[0]: error calling MarshalText for type ironflock.pjFailText: text boom"},
 		{map[pjFailKey]int{1: 1}, "error calling MarshalText for a map key of type ironflock.pjFailKey: key boom"},
-		{map[bool]int{true: 1}, "unsupported type map[bool]int"},
+		{map[bool]int{true: 1}, "unsupported map key type bool"},
+		{Row{"m": map[*int]int{nil: 1}}, "m: unsupported map key: a nil *int"},
+		{map[any]int{1.5: 1}, "unsupported map key 1.5: a float64 in an interface {} key"},
+		{map[float32]int{float32(math.Inf(1)): 1}, "unsupported map key +Inf"},
+		{[]pjFormat{{}}, `[0]: encoding/json does not support the "format" tag option of field T of ironflock.pjFormat`},
+		{pjNested(maxNesting + 1), "[0][0][0][0][0][0][0][0]…[0][0][0][0][0][0][0][0]: objects and arrays are nested more than 10000 deep"},
 		{quoted{F: math.NaN()}, `f: NaN cannot be sent in a field with the ",string" option`},
 		{quoted{F: math.Inf(-1)}, `f: -Inf cannot be sent in a field with the ",string" option`},
 		{json.Number("abc"), `invalid number literal "abc"`},
@@ -547,9 +560,9 @@ func TestNormalizeErrorsSayWhere(t *testing.T) {
 
 // pjAmbiguousJSON embeds two unexported structs with a MarshalJSON method
 // under tag names: neither method is promoted (they conflict at the same
-// depth), so each field is encoded through its own method — which
-// reflection cannot call on a value reached through an unexported embedded
-// field. encoding/json panics on such types; normalize reports an error.
+// depth), and a method cannot be called through an unexported field.
+// encoding/json leaves both fields out (before Go 1.27 it panicked);
+// normalize refuses the struct rather than drop their data.
 type pjAmbiguousJSON struct {
 	pjHiddenJSON1 `json:"a"`
 	pjHiddenJSON2 `json:"b"`
@@ -591,35 +604,112 @@ type pjHiddenZero2 struct{ N int }
 
 func (pjHiddenZero2) IsZero() bool { return false }
 
-// normalize does not panic where encoding/json does: it reports a method it
-// cannot call, and returns nil for a nil pointer inside a json.Marshaler
-// interface whose method has a value receiver, which encoding/json calls on
-// the nil pointer (see also TestNormalizeNilReceiversWhereEncodingJSONPanics).
+// encoding/json leaves out a tagged unexported embedded struct whose
+// methods (marshal or unmarshal, its own or its pointer's, or IsZero with
+// omitzero) it cannot call on it, dropping its data; normalize refuses the
+// value with an error naming the field.
+func TestNormalizeRefusesFieldsEncodingJSONLeavesOut(t *testing.T) {
+	cases := []struct {
+		in       any
+		json     string // what encoding/json makes of it
+		field    string
+		method   string
+		embedder string
+	}{
+		{pjAmbiguousJSON{}, `{}`, "pjHiddenJSON1", "MarshalJSON", "ironflock.pjAmbiguousJSON"},
+		{&pjAmbiguousJSON{}, `{}`, "pjHiddenJSON1", "MarshalJSON", "ironflock.pjAmbiguousJSON"},
+		{pjAmbiguousText{}, `{}`, "pjHiddenText1", "MarshalText", "ironflock.pjAmbiguousText"},
+		{pjAmbiguousZero{}, `{}`, "pjHiddenZero1", "IsZero", "ironflock.pjAmbiguousZero"},
+		{pjHiddenMethods{pjHiddenUnmarshal{1}, pjHiddenPtrText{2}, pjhidden{3, 4}}, `{"h":{"Visible":3}}`,
+			"pjHiddenUnmarshal", "UnmarshalJSON", "ironflock.pjHiddenMethods"},
+		{Row{"r": []any{pjAmbiguousText{}}}, `{"r":[{}]}`, "pjHiddenText1", "MarshalText", "ironflock.pjAmbiguousText"},
+	}
+	for _, c := range cases {
+		if b, err := json.Marshal(c.in); err != nil || string(b) != c.json {
+			t.Errorf("%#v: encoding/json gives %s, %v; want %s", c.in, b, err, c.json)
+		}
+		_, err := normalize(c.in)
+		want := fmt.Sprintf("field %s of %s is an unexported embedded struct with a %s method, which cannot be called on it: "+
+			"encoding/json would leave it out, dropping its data", c.field, c.embedder, c.method)
+		if !errors.Is(err, errLeftOut) || !strings.HasSuffix(err.Error(), want) {
+			t.Errorf("%#v: %v\nwant …%s", c.in, err, want)
+		}
+	}
+	// Through a pointer receiver promoted to *pjHiddenMethods, the struct is
+	// encoded through MarshalText, not field by field: nothing is left out.
+	if got, err := normalize([]pjHiddenMethods{{}}); err != nil || !reflect.DeepEqual(got, []any{"hidden"}) {
+		t.Errorf("addressable: %#v, %v", got, err)
+	}
+}
+
+// pjCustomMarshaler is an interface type with MarshalJSON that is not
+// json.Marshaler: encoding/json panics on a nil pointer held in it.
+type pjCustomMarshaler interface {
+	json.Marshaler
+	Name() string
+}
+
+type pjCustom struct{}
+
+func (*pjCustom) MarshalJSON() ([]byte, error) { return []byte(`"custom"`), nil }
+func (*pjCustom) Name() string                 { return "custom" }
+
+// pjHiddenMethods embeds unexported structs under tag names whose methods
+// encoding/json would not call on them (an unmarshal method, a marshal
+// method of the pointer): it leaves them out all the same. The one without
+// methods is a field. (Their methods are promoted to *pjHiddenMethods, which
+// encoding/json encodes through MarshalText.)
+type pjHiddenMethods struct {
+	pjHiddenUnmarshal `json:"u"`
+	pjHiddenPtrText   `json:"p"`
+	pjhidden          `json:"h"`
+}
+
+type pjHiddenUnmarshal struct{ N int }
+
+func (*pjHiddenUnmarshal) UnmarshalJSON([]byte) error { return nil }
+
+type pjHiddenPtrText struct{ N int }
+
+func (*pjHiddenPtrText) MarshalText() ([]byte, error) { return []byte("hidden"), nil }
+
+// normalize does not panic where encoding/json does: it returns nil for a nil
+// pointer inside a json.Marshaler interface whose method has a value
+// receiver, which encoding/json calls on the nil pointer (see also
+// TestNormalizeNilReceiversWhereEncodingJSONPanics), and for a nil pointer
+// in an interface with a marshal method that is none of json.Marshaler,
+// encoding.TextAppender and encoding.TextMarshaler.
 func TestNormalizeWhereEncodingJSONPanics(t *testing.T) {
 	type marshalerField struct {
 		M json.Marshaler `json:"m"`
+	}
+	type customField struct {
+		C pjCustomMarshaler `json:"c"`
 	}
 	panics := func(v any) (panicked bool) {
 		defer func() { panicked = recover() != nil }()
 		_, _ = json.Marshal(v)
 		return false
 	}
-	for _, v := range []any{pjAmbiguousJSON{}, &pjAmbiguousJSON{}, pjAmbiguousText{}, pjAmbiguousZero{}} {
-		if !panics(v) {
-			t.Errorf("%T: encoding/json no longer panics; add it to the differential corpus", v)
+	cases := []struct {
+		name string
+		in   any
+		want any
+	}{
+		{"nil pointer in a json.Marshaler", marshalerField{M: (*pjJSONVal)(nil)}, map[string]any{"m": nil}},
+		{"nil pointer in another marshaler interface", customField{C: (*pjCustom)(nil)}, map[string]any{"c": nil}},
+		{"nil pointer key in another marshaler interface", map[pjCustomMarshaler]int{(*pjCustom)(nil): 1}, map[string]any{"": int64(1)}},
+	}
+	for _, c := range cases {
+		if !panics(c.in) {
+			t.Errorf("%s: encoding/json no longer panics; add it to the differential corpus", c.name)
 		}
-		_, err := normalize(v)
-		if err == nil || !strings.Contains(err.Error(), "reached through an unexported embedded field") {
-			t.Errorf("%T: %v", v, err)
+		if got, err := normalizeNoPanic(c.in); err != nil || !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s: %#v, %v; want %#v", c.name, got, err, c.want)
 		}
 	}
-	nilInside := marshalerField{M: (*pjJSONVal)(nil)}
-	if !panics(nilInside) {
-		t.Error("encoding/json no longer panics on a nil pointer in a json.Marshaler field")
-	}
-	if got, err := normalize(nilInside); err != nil || !reflect.DeepEqual(got, map[string]any{"m": nil}) {
-		t.Errorf("nil pointer in a json.Marshaler: %#v, %v", got, err)
-	}
+	// Not nil, the pointer in such an interface is encoded as any value.
+	checkLikeJSON(t, "pointer in another marshaler interface", customField{C: &pjCustom{}}, false)
 }
 
 // normalizeNoPanic is normalize, reporting a panic as an error.
@@ -1018,26 +1108,28 @@ func refNumbers(v any) (any, error) {
 
 // diffJSON describes how got, normalize's result for a value, differs from
 // want, viaJSON's for the same value, allowing for normalize's documented
-// differences: []byte stays bytes instead of a base64 string; a time.Time
-// is sent in UTC, as a value and as a map key, so keys naming the same
-// instant merge into one, holding the value of the greatest original key;
-// and a float stays a float — where encoding/json wrote an integral float as
-// an integer, lenient accepts the float, otherwise the caller must use
+// differences, which the SDK keeps on purpose so that it sends what the
+// Python and JavaScript SDKs send: []byte stays bytes (msgpack bin) instead
+// of a base64 string; a time.Time is sent in UTC, as a value and as a map
+// key (encoding/json keeps its zone offset), so keys naming the same instant
+// merge into one, holding the value of the greatest original key; and a
+// float stays a float — where encoding/json wrote an integral float as an
+// integer, lenient accepts the float, otherwise the caller must use
 // non-integral floats only. It returns "" when they agree.
 func diffJSON(got, want any, lenient bool) string {
 	return diffAt("", got, want, lenient)
 }
 
 func diffAt(path string, got, want any, lenient bool) string {
-	bad := fmt.Sprintf("at %q: got %#v (%T), want %#v (%T)", path, got, got, want, want)
+	bad := func() string { return fmt.Sprintf("at %q: got %#v (%T), want %#v (%T)", path, got, got, want, want) }
 	switch w := want.(type) {
 	case nil:
 		if got != nil {
-			return bad
+			return bad()
 		}
 	case bool:
 		if g, ok := got.(bool); !ok || g != w {
-			return bad
+			return bad()
 		}
 	case string:
 		switch g := got.(type) {
@@ -1046,52 +1138,52 @@ func diffAt(path string, got, want any, lenient bool) string {
 				// A time.Time: normalize sends the same instant in UTC.
 				t, err := time.Parse(time.RFC3339Nano, w)
 				if err != nil || g != t.UTC().Format(time.RFC3339Nano) {
-					return bad
+					return bad()
 				}
 			}
 		case []byte:
 			if base64.StdEncoding.EncodeToString(g) != w {
-				return bad
+				return bad()
 			}
 		default:
-			return bad
+			return bad()
 		}
 	case int64:
 		switch g := got.(type) {
 		case int64:
 			if g != w {
-				return bad
+				return bad()
 			}
 		case float64:
 			// encoding/json writes an integral float as its shortest decimal
 			// form: the float nearest to that integer is the float itself.
 			if !lenient || float64(w) != g {
-				return bad
+				return bad()
 			}
 		default:
-			return bad
+			return bad()
 		}
 	case uint64:
 		switch g := got.(type) {
 		case uint64:
 			if g != w {
-				return bad
+				return bad()
 			}
 		case float64:
 			if !lenient || float64(w) != g {
-				return bad
+				return bad()
 			}
 		default:
-			return bad
+			return bad()
 		}
 	case float64:
 		if g, ok := got.(float64); !ok || g != w {
-			return bad
+			return bad()
 		}
 	case []any:
 		g, ok := got.([]any)
 		if !ok || len(g) != len(w) {
-			return bad
+			return bad()
 		}
 		for i := range w {
 			if d := diffAt(fmt.Sprintf("%s[%d]", path, i), g[i], w[i], lenient); d != "" {
@@ -1101,7 +1193,7 @@ func diffAt(path string, got, want any, lenient bool) string {
 	case map[string]any:
 		g, ok := got.(map[string]any)
 		if !ok {
-			return bad
+			return bad()
 		}
 		// The key of got each key of want is sent as: itself, or a time.Time
 		// key in UTC. Of keys of want sent as the same key, the greatest wins.
@@ -1118,7 +1210,7 @@ func diffAt(path string, got, want any, lenient bool) string {
 			}
 		}
 		if len(g) != len(wins) {
-			return bad
+			return bad()
 		}
 		for gk, k := range wins {
 			gv, ok := g[gk]
@@ -1145,6 +1237,11 @@ func checkLikeJSON(t *testing.T, name string, v any, lenient bool) {
 	case err != nil && wantErr != nil:
 	case wantErr != nil:
 		t.Errorf("%s: normalize gave %#v; encoding/json fails: %v", name, got, wantErr)
+	case errors.Is(err, errLeftOut):
+		// A documented difference, kept on purpose: encoding/json leaves out
+		// a tagged unexported embedded struct whose methods it cannot call,
+		// silently dropping its data; normalize refuses the value instead
+		// (TestNormalizeRefusesFieldsEncodingJSONLeavesOut checks both sides).
 	case err != nil:
 		t.Errorf("%s: normalize failed: %v; encoding/json gives %#v", name, err, want)
 	default:
@@ -1691,6 +1788,139 @@ type pjTextRow struct {
 
 func (r *pjTextRow) MarshalText() ([]byte, error) { return fmt.Appendf(nil, "text-%d", r.A), nil }
 
+// pjSelfKey is a pointer type that can point to itself.
+type pjSelfKey *pjSelfKey
+
+func pjSelfKeyLoop() pjSelfKey {
+	p := new(pjSelfKey)
+	*p = p
+	return p
+}
+
+// pjFormat has the "format" tag option, which encoding/json refuses (only
+// encoding/json/v2 supports it).
+type pjFormat struct {
+	T time.Time `json:",format:unix"`
+}
+
+// pjNested returns n nested non-empty lists around 1.
+func pjNested(n int) any { return pjNestedAround(n, 1) }
+
+// pjNestedAround returns n nested non-empty lists around v.
+func pjNestedAround(n int, v any) any {
+	for range n {
+		v = []any{v}
+	}
+	return v
+}
+
+// pjAppender has AppendText with a pointer receiver (for a nil receiver
+// too) and MarshalText with a value receiver: encoding/json prefers
+// AppendText where it can call it.
+type pjAppender struct{ N int }
+
+func (a *pjAppender) AppendText(b []byte) ([]byte, error) {
+	if a == nil {
+		return append(b, "append-nil"...), nil
+	}
+	return fmt.Appendf(b, "append-%d", a.N), nil
+}
+
+func (a pjAppender) MarshalText() ([]byte, error) { return fmt.Appendf(nil, "text-%d", a.N), nil }
+
+// pjByteApp is a byte type with AppendText: a []pjByteApp is encoded element
+// by element.
+type pjByteApp byte
+
+func (b pjByteApp) AppendText(dst []byte) ([]byte, error) { return fmt.Appendf(dst, "a%d", b), nil }
+
+// pjJSONTo encodes itself with json/v2's MarshalJSONTo, which encoding/json
+// calls first.
+type pjJSONTo struct{ N int }
+
+func (v pjJSONTo) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return enc.WriteValue(jsontext.Value(fmt.Appendf(nil, `{"to": %d, "f": 2.0, "s": "a\u00ffb"}`, v.N)))
+}
+
+// pjJSONToPtr has MarshalJSONTo with a pointer receiver and MarshalJSON with
+// a value receiver: the first where the value is addressable.
+type pjJSONToPtr struct{ N int }
+
+func (v *pjJSONToPtr) MarshalJSONTo(enc *jsontext.Encoder) error {
+	if v == nil {
+		return enc.WriteToken(jsontext.String("to-nil"))
+	}
+	return enc.WriteToken(jsontext.String(fmt.Sprint("to-ptr-", v.N)))
+}
+
+func (v pjJSONToPtr) MarshalJSON() ([]byte, error) { return fmt.Appendf(nil, `"json-%d"`, v.N), nil }
+
+// pjEmbed has fields with the ",embed" option: a struct's fields join the
+// struct's own; a map's or a jsontext.Value's members are added after them.
+type pjEmbed struct {
+	A     int
+	In    PjEmbB         `json:",embed"`
+	Named PjEmbA         `json:"named,embed"` // a named field after all
+	P     *PjTagged      `json:",embed"`      // its tagged Shared wins over In's
+	Int   int            `json:",embed"`      // not a struct: a field
+	Extra map[string]any `json:",embed"`
+}
+
+type pjEmbedRaw struct {
+	A   int
+	Raw jsontext.Value `json:",embed"`
+}
+
+// pjTwoFallbacks has two embedded fallbacks at the same depth: neither is
+// encoded.
+type pjTwoFallbacks struct {
+	M1 map[string]int `json:",embed"`
+	M2 map[string]int `json:",embed"`
+	N  int
+}
+
+// pjMethodKeyFallback's map has a key type with methods: it is a field.
+type pjMethodKeyFallback struct {
+	M map[pjStringKey]int `json:",embed"`
+}
+
+// pjOddTags has tags whose names end early or are not names at all.
+//
+//nolint:staticcheck // SA5008: the odd tags are what is tested.
+type pjOddTags struct {
+	Quoted   int `json:"'q'"`
+	Escaped  int `json:"a b\\c"`
+	Mid      int `json:"ab-c\"d"`
+	Leading  int `json:"\"x"`
+	Bad      int `json:"\xff"`
+	Digit    int `json:"9lives"`
+	Case     int `json:"c,case:ignore"`
+	CaseOnly int `json:",case:strict"`
+	BadOpt   int `json:",omitEmpty"`
+	Format   int `json:",format"`
+	Embedded int `json:"e,embed"`
+}
+
+// pjQuotedPointers has the ",string" option through pointers, named or
+// not, and on types it does not change.
+//
+//nolint:staticcheck // SA5008: the option on other kinds is what is tested.
+type pjQuotedPointers struct {
+	PNamedP *pjPtr         `json:",string"`
+	Dur     time.Duration  `json:",string"`
+	PDur    *time.Duration `json:",string"`
+	Num     *json.Number   `json:",string"`
+	PBool   *bool          `json:",string"`
+	PStr    *string        `json:",string"`
+	PFloat  *float32       `json:",string"`
+	Time    time.Time      `json:",string"`
+	Bytes   []byte         `json:",string"`
+	State   pjState        `json:",string"`
+	Map     map[string]int `json:",string"`
+	Arr     [1]int         `json:",string"`
+	Appd    pjAppender     `json:",string"`
+}
+
 // pjCorpus returns the values normalize must encode as encoding/json does
 // (up to the documented differences): every struct-tag rule, embedding,
 // map keys, nil values, marshalers, special types, and values both refuse.
@@ -1720,6 +1950,9 @@ func pjCorpus() []struct {
 	}
 	cyclicPtr := &pjCycle{}
 	cyclicPtr.Next = cyclicPtr
+	str, state, half := "s", pjState(1), float32(0.5)
+	dur, yes := time.Second, true
+	num := json.Number("1.5")
 
 	type c = struct {
 		name string
@@ -1763,6 +1996,29 @@ func pjCorpus() []struct {
 			map[string]map[string]any{"m": {"n": nil}},
 			map[string]func(){},
 		}},
+		{"map keys of other types", []any{
+			map[float64]string{1.5: "a", 1e21: "b", math.Copysign(0, -1): "c", 2: "d", 1e-7: "e"},
+			map[float32]string{0.1: "a", 16777216: "b"},
+			map[*int]string{pn: "p"},
+			map[*string]int{&str: 1},
+			map[**int]int{&pn: 1},
+			map[any]int{"a": 1, 2: 2, int8(-3): 3, float32(1.5): 4, uint(5): 5},
+			map[any]int{pjKey{1, 2}: 1, &pjPtrKey{N: 6}: 2, at: 3, &atUTC: 4, pjAppender{1}: 5, &pjAppender{2}: 6},
+			map[fmt.Stringer]int{pjStringer("s"): 1, time.Duration(7): 2},
+			map[time.Duration]int{time.Second: 1},
+			map[json.Number]int{"1.50": 1},
+			map[*big.Int]int{big.NewInt(-7): 1},
+			map[pjAppender]int{{1}: 1},
+			map[*pjAppender]int{{2}: 1, nil: 2},
+			map[pjState]int{1: 1},
+			map[*pjState]int{&state: 1},
+			map[encoding.TextAppender]int{&pjAppender{3}: 1, (*pjAppender)(nil): 2, at: 3},
+			map[*[]byte]int{{1, 2, 3}: 1},
+		}},
+		{"empty maps with keys that are no strings", []any{
+			map[[2]int]int{}, map[bool]int{}, map[struct{ A int }]int{}, map[chan int]int{}, map[pjJSONVal]int{},
+			map[complex64]int{}, map[any]int{},
+		}},
 		{"map keys that coerce to the same string", []any{
 			map[string]int{"\xff": 1, "�": 2, "\xfe": 3, "ok": 4},
 			map[string]int{"�": 2, "\xef": 5},
@@ -1795,6 +2051,21 @@ func pjCorpus() []struct {
 			Slice: []int{1}, Iface: 1, Both: 4}},
 		{"string option, zero", pjQuoted{}},
 		{"string option, small float", pjQuoted{Float: 1e-7, Float32: 1e-7}},
+		{"string option through pointers", pjQuotedPointers{PNamedP: (*pjPtr)(&pn), Dur: dur, PDur: &dur, Num: &num,
+			PBool: &yes, PStr: &str, PFloat: &half, Time: at, Bytes: []byte("b"), State: 1, Map: map[string]int{"a": 1},
+			Arr: [1]int{2}, Appd: pjAppender{3}}},
+		{"string option through pointers, zero", pjQuotedPointers{}},
+		{"string option through pointers, addressable", &pjQuotedPointers{State: 1, Num: new(json.Number)}},
+		{"odd tags", pjOddTags{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}},
+		{"embed option", []any{
+			pjEmbed{A: 1, In: PjEmbB{2, "b"}, Named: PjEmbA{3, "a"}, P: &PjTagged{4}, Int: 5, Extra: map[string]any{"A": "extra", "z": 1.5, "\xff": 1, "\xfe": 2}},
+			pjEmbed{A: 1, In: PjEmbB{2, "b"}},
+			&pjEmbed{Extra: map[string]any{"B": nil}},
+			pjEmbedRaw{A: 1, Raw: jsontext.Value(` {"A": 9, "r": [1, 2.0, {"x": null}], "A": 10} `)},
+			pjEmbedRaw{A: 2},
+			pjTwoFallbacks{M1: map[string]int{"a": 1}, M2: map[string]int{"b": 2}, N: 3},
+			pjMethodKeyFallback{M: map[pjStringKey]int{"k": 1}},
+		}},
 		// Embedding.
 		{"conflict at the same depth", pjTwoEmbedded{PjEmbA{1, "a"}, PjEmbB{2, "b"}}},
 		{"tagged wins", pjTaggedWins{PjEmbA{1, "a"}, PjTagged{2}}},
@@ -1812,6 +2083,19 @@ func pjCorpus() []struct {
 		{"MarshalJSON", []any{pjJSONVal{1}, &pjJSONVal{2}, (*pjJSONVal)(nil), pjList{1, 2}, pjList(nil), pjBoth{}}},
 		{"MarshalJSON output", []pjRawJSON{` [1, 2.0] `, `"a<b"`, "\"a\xffb\"", `null`, `{"a": {"b": [true]}}`, `-0.0`, `1E2`}},
 		{"MarshalText", []any{pjTextVal{"v"}, &pjTextVal{"p"}, &pjTextPtr{"q"}, pjMixed{1}, &pjMixed{2}, pjTextVal{"\xff"}}},
+		{"AppendText", []any{pjAppender{1}, &pjAppender{2}, []pjAppender{{3}}, [1]pjAppender{{4}}, map[string]pjAppender{"m": {5}},
+			struct{ A pjAppender }{pjAppender{6}}, &struct{ A pjAppender }{pjAppender{7}}, []pjByteApp{1, 2}, big.NewInt(8)}},
+		{"MarshalJSONTo", []any{pjJSONTo{1}, &pjJSONTo{2}, pjJSONToPtr{3}, &pjJSONToPtr{4}, []pjJSONToPtr{{5}},
+			struct{ T pjJSONTo }{pjJSONTo{6}}, json.Number("7"), map[string]pjJSONToPtr{"m": {8}}}},
+		{"nil pointers in interfaces of each marshal method", []any{
+			struct{ T encoding.TextAppender }{(*pjAppender)(nil)},
+			struct{ T jsonv2.MarshalerTo }{(*pjJSONToPtr)(nil)},
+			struct{ T encoding.TextAppender }{&pjAppender{9}},
+			struct{ T jsonv2.MarshalerTo }{&pjJSONToPtr{10}},
+			struct{ T jsonv2.MarshalerTo }{pjJSONTo{11}},
+		}},
+		{"unexported embedded structs with methods, named by tags", []any{pjAmbiguousJSON{}, &pjAmbiguousJSON{}, pjAmbiguousText{}, pjAmbiguousZero{},
+			pjHiddenMethods{pjHiddenUnmarshal{1}, pjHiddenPtrText{2}, pjhidden{3, 4}}}},
 		{"pointer receivers, not addressable", addressable},
 		{"pointer receivers, addressable", &addressable},
 		{"pointer receivers in a slice", []pjAddressable{addressable}},
@@ -1865,9 +2149,20 @@ func pjCorpus() []struct {
 		{"complex", complex64(1)},
 		{"unsafe pointer", unsafe.Pointer(&n)},
 		{"bool map key", map[bool]int{true: 1}},
-		{"float map key", map[float64]int{1: 1}},
-		{"interface map key", map[any]int{"a": 1}},
-		{"struct map key", map[[2]int]int{}},
+		{"NaN map key", map[float64]int{math.NaN(): 1}},
+		{"float64 in an interface map key", map[any]int{1.5: 1}},
+		{"bool in an interface map key", map[any]int{true: 1}},
+		{"nil interface map key", map[any]int{nil: 1}},
+		{"nil pointer map key", map[*int]int{nil: 1}},
+		{"array map key", map[[2]int]int{{1, 2}: 1}},
+		{"struct map key", map[struct{ A int }]int{{1}: 1}},
+		{"map key with MarshalJSON only", map[pjJSONVal]int{{1}: 1}},
+		{"map key with MarshalJSON only, in an interface", map[any]int{pjJSONVal{1}: 1}},
+		{"map key with MarshalText with a pointer receiver, in an interface", map[any]int{pjPtrKey{1}: 1}},
+		{"nil pointer in a json.Marshaler map key", map[json.Marshaler]int{(*pjOptional)(nil): 1}},
+		{"format tag option", pjFormat{}},
+		{"embedded JSON that is not an object", pjEmbedRaw{Raw: jsontext.Value("[1]")}},
+		{"embedded JSON that is not valid", pjEmbedRaw{Raw: jsontext.Value("{")}},
 		{"func in a slice", []any{1, func() {}}},
 		{"empty slice of funcs", []func(){}},
 		{"cyclic map", cyclicMap},
@@ -1916,6 +2211,39 @@ func TestNormalizeMatchesEncodingJSON(t *testing.T) {
 	}
 }
 
+// Objects and arrays nested more than 10000 deep fail, counted as
+// json.Marshal counts them: it writes an empty slice or map without counting
+// it, but not an empty array or struct, and counts the objects and arrays in
+// what a MarshalJSON method returns.
+func TestNormalizeNestingLimit(t *testing.T) {
+	cases := []struct {
+		name string
+		v    any
+		ok   bool
+	}{
+		{"10000 lists", pjNested(maxNesting), true},
+		{"10001 lists", pjNested(maxNesting + 1), false},
+		{"10001 lists in a struct", struct{ L any }{pjNested(maxNesting)}, false},
+		{"10000 lists around an empty one", pjNestedAround(maxNesting, []any{}), true},
+		{"10000 lists around an empty typed slice", pjNestedAround(maxNesting, []int{}), true},
+		{"10000 lists around an empty map", pjNestedAround(maxNesting, map[string]int{}), true},
+		{"10000 lists around an empty Row", pjNestedAround(maxNesting, Row{}), true},
+		{"10000 lists around an empty array", pjNestedAround(maxNesting, [0]int{}), false},
+		{"10000 lists around an empty struct", pjNestedAround(maxNesting, struct{}{}), false},
+		{"MarshalJSON output 10000 deep", pjNestedAround(maxNesting-2, pjRawJSON("[[]]")), true},
+		{"MarshalJSON output 10001 deep", pjNestedAround(maxNesting-1, pjRawJSON("[[]]")), false},
+		{"MarshalJSON output 10001 deep, the innermost empty", pjNestedAround(maxNesting-1, pjRawJSON("[{}]")), false},
+	}
+	for _, c := range cases {
+		if _, err := json.Marshal(c.v); (err == nil) != c.ok {
+			t.Errorf("%s: encoding/json: %v", c.name, err)
+		}
+		if _, err := normalize(c.v); (err == nil) != c.ok {
+			t.Errorf("%s: %v", c.name, err)
+		}
+	}
+}
+
 // ---- properties over random types and values ----
 
 // pjRandom builds random types — struct types made with reflect.StructOf,
@@ -1948,10 +2276,17 @@ var (
 		reflect.TypeFor[pjTextVal](), reflect.TypeFor[pjTextPtr](), reflect.TypeFor[pjMixed](), reflect.TypeFor[pjBoth](),
 		reflect.TypeFor[pjZeroVal](), reflect.TypeFor[pjZeroPtr](), reflect.TypeFor[pjList](), reflect.TypeFor[pjByteText](),
 		reflect.TypeFor[pjEmbedsTime](), reflect.TypeFor[json.Marshaler](), reflect.TypeFor[encoding.TextMarshaler](),
+		reflect.TypeFor[encoding.TextAppender](), reflect.TypeFor[pjPtr](), reflect.TypeFor[time.Duration](),
+		reflect.TypeFor[pjAppender](), reflect.TypeFor[pjJSONTo](), reflect.TypeFor[pjJSONToPtr](), reflect.TypeFor[pjByteApp](),
+		reflect.TypeFor[pjState](),
 	}
 	pjKeyTypes = []reflect.Type{
 		reflect.TypeFor[string](), reflect.TypeFor[pjString](), reflect.TypeFor[int](), reflect.TypeFor[uint8](),
-		reflect.TypeFor[pjKey](), reflect.TypeFor[pjIntKey](), reflect.TypeFor[time.Time](),
+		reflect.TypeFor[pjKey](), reflect.TypeFor[pjIntKey](), reflect.TypeFor[time.Time](), reflect.TypeFor[float64](),
+		reflect.TypeFor[pjFloat32](), reflect.TypeFor[time.Duration](), reflect.TypeFor[pjAppender](), reflect.TypeFor[pjState](),
+		reflect.TypeFor[json.Number](),
+		// No pointer keys: two pointers to equal values make the same key,
+		// and which entry encoding/json keeps then is up to chance.
 	}
 	// pjAnyTypes are the types of the values put in an interface.
 	pjAnyTypes = []reflect.Type{
@@ -1960,7 +2295,8 @@ var (
 		reflect.TypeFor[time.Time](), reflect.TypeFor[*time.Time](), reflect.TypeFor[pjJSONVal](), reflect.TypeFor[*pjJSONPtr](),
 		reflect.TypeFor[pjJSONPtr](), reflect.TypeFor[pjTextVal](), reflect.TypeFor[pjMixed](), reflect.TypeFor[*pjMixed](),
 		reflect.TypeFor[pjTags](), reflect.TypeFor[pjOmitEmpty](), reflect.TypeFor[json.Number](), reflect.TypeFor[pjByteText](),
-		reflect.TypeFor[pjEmbedsTime](),
+		reflect.TypeFor[pjEmbedsTime](), reflect.TypeFor[pjAppender](), reflect.TypeFor[*pjAppender](), reflect.TypeFor[pjJSONTo](),
+		reflect.TypeFor[pjJSONToPtr](), reflect.TypeFor[*pjJSONToPtr](),
 	}
 	// pjMarshalerTypes and pjTextMarshalerTypes are the types of the values
 	// put in a json.Marshaler and in an encoding.TextMarshaler. encoding/json
@@ -1970,11 +2306,16 @@ var (
 		reflect.TypeFor[pjJSONVal](), reflect.TypeFor[*pjJSONPtr](), reflect.TypeFor[*pjMixed](), reflect.TypeFor[pjBoth](),
 		reflect.TypeFor[pjList](), reflect.TypeFor[time.Time](), reflect.TypeFor[*time.Time](), reflect.TypeFor[*big.Int](),
 		reflect.TypeFor[pjEmbedsTime](), reflect.TypeFor[*pjOptional](), reflect.TypeFor[json.RawMessage](),
+		reflect.TypeFor[pjJSONToPtr](), reflect.TypeFor[*pjJSONToPtr](),
 	}
 	pjTextMarshalerTypes = []reflect.Type{
 		reflect.TypeFor[pjTextVal](), reflect.TypeFor[*pjTextPtr](), reflect.TypeFor[pjMixed](), reflect.TypeFor[*pjMixed](),
 		reflect.TypeFor[pjBoth](), reflect.TypeFor[time.Time](), reflect.TypeFor[*time.Time](), reflect.TypeFor[*big.Int](),
-		reflect.TypeFor[*big.Float](), reflect.TypeFor[pjEmbedsTime](), reflect.TypeFor[pjKey](),
+		reflect.TypeFor[*big.Float](), reflect.TypeFor[pjEmbedsTime](), reflect.TypeFor[pjKey](), reflect.TypeFor[pjAppender](),
+		reflect.TypeFor[*pjAppender](),
+	}
+	pjTextAppenderTypes = []reflect.Type{
+		reflect.TypeFor[*pjAppender](), reflect.TypeFor[time.Time](), reflect.TypeFor[*big.Int](), reflect.TypeFor[pjByteApp](),
 	}
 	pjNilSafe = map[[2]reflect.Type]bool{ // {interface, pointer type}
 		{marshalerType, reflect.TypeFor[*pjMixed]()}:       true,
@@ -1982,9 +2323,11 @@ var (
 		{marshalerType, reflect.TypeFor[*pjOptional]()}:    true,
 		{textMarshalerType, reflect.TypeFor[*big.Int]()}:   true,
 		{textMarshalerType, reflect.TypeFor[*big.Float]()}: true,
+		{textAppenderType, reflect.TypeFor[*pjAppender]()}: true,
+		{textAppenderType, reflect.TypeFor[*big.Int]()}:    true,
 	}
 	pjFieldNames = []string{"A", "B", "Shared", "X", "Y"}
-	pjTagNames   = []string{"a", "b", "B", "Shared", "shared", "x", "A", "-", "a-b", "ü", `in\"valid`}
+	pjTagNames   = []string{"a", "b", "B", "Shared", "shared", "x", "A", "-", "a-b", "ü", `in\"valid`, "'q'", "9x", `x\\y`}
 	pjInts       = []int64{0, 1, -1, 42, -128, 127, 255, 1 << 31, math.MaxInt64, math.MinInt64, 1<<53 + 1}
 	pjUints      = []uint64{0, 1, 255, 1 << 16, math.MaxUint32, 1 << 63, math.MaxUint64}
 	pjFloats     = []float64{0, math.Copysign(0, -1), 1, -1, 2, 0.5, -2.25, 0.1, 1.1, 22.3, 1e20, 1e21, 1.5e300,
@@ -2079,7 +2422,8 @@ func (g *pjRandom) tag(embedded bool) reflect.StructTag {
 	if embedded {
 		options = []string{"", "", "", name, "-", ",omitempty"}
 	} else {
-		options = []string{"", "", "", "", name, "-", "-,", ",omitempty", ",omitzero", name + ",omitempty", name + ",omitempty,omitzero"}
+		options = []string{"", "", "", "", name, "-", "-,", ",omitempty", ",omitzero", name + ",omitempty", name + ",omitempty,omitzero",
+			",embed", name + ",embed", ",embed,omitempty"}
 		if g.quoted {
 			options = append(options, ",string", name+",string", name+",omitzero,string")
 		}
@@ -2100,6 +2444,9 @@ func (g *pjRandom) fill(v reflect.Value, depth int) {
 		return
 	case numberType:
 		v.SetString(pjNumbers[r.IntN(len(pjNumbers))])
+		return
+	case reflect.TypeFor[pjState]():
+		v.SetInt(int64(r.IntN(2))) // its MarshalText knows two states
 		return
 	case reflect.TypeFor[json.RawMessage]():
 		if raw := []string{"", "null", `{"a": [1, 2.5]}`, `"s"`, "7"}[r.IntN(5)]; raw != "" {
@@ -2161,8 +2508,13 @@ func (g *pjRandom) fill(v reflect.Value, depth int) {
 		if k := r.IntN(5); k > 0 {
 			m := reflect.MakeMap(t)
 			for range k - 1 {
+				// A float key is the special float only where it is finite:
+				// NaN cannot be a key.
 				key := reflect.New(t.Key()).Elem()
+				special := g.special
+				g.special = pjSentinel
 				g.fill(key, depth+1)
+				g.special = special
 				val := reflect.New(t.Elem()).Elem()
 				g.fill(val, depth+1)
 				m.SetMapIndex(key, val)
@@ -2173,7 +2525,7 @@ func (g *pjRandom) fill(v reflect.Value, depth int) {
 		if r.IntN(3) > 0 {
 			p := reflect.New(t.Elem())
 			g.fill(p.Elem(), depth+1)
-			v.Set(p)
+			v.Set(p.Convert(t)) // t may be a named pointer type
 		}
 	case reflect.Interface:
 		if r.IntN(3) > 0 && depth < 6 {
@@ -2183,6 +2535,8 @@ func (g *pjRandom) fill(v reflect.Value, depth int) {
 				types = pjMarshalerTypes
 			case textMarshalerType:
 				types = pjTextMarshalerTypes
+			case textAppenderType:
+				types = pjTextAppenderTypes
 			}
 			e := reflect.New(types[r.IntN(len(types))]).Elem()
 			g.fill(e, depth+1)
@@ -2244,12 +2598,14 @@ func TestNormalizeNonFiniteFloatsLikeFinite(t *testing.T) {
 		withNaN := pjRandomValue(seed, false, false, true)
 		finite := pjRandomValue(seed, false, false, false)
 		got, err := normalize(withNaN)
-		if err != nil {
-			t.Fatalf("seed %d: %v", seed, err)
-		}
-		want, err := normalize(finite)
-		if err != nil {
-			t.Fatalf("seed %d: %v", seed, err)
+		want, err2 := normalize(finite)
+		if err != nil || err2 != nil {
+			// A value encoding/json refuses too (an embedded JSON field
+			// holding no object, say) fails the same either way.
+			if err == nil || err2 == nil || err.Error() != err2.Error() {
+				t.Fatalf("seed %d: %v; finite: %v", seed, err, err2)
+			}
+			continue
 		}
 		if !pjEqual(got, want, true) {
 			t.Fatalf("seed %d:\n got  %#v\n want %#v (NaN for %v)", seed, got, want, pjSentinel)

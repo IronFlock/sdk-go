@@ -25,7 +25,7 @@ go get github.com/RecordEvolution/ironflock-go
 ### WAMP library
 
 The SDK speaks WAMP through IronFlock's fork of [nexus](https://github.com/IronFlock/nexus)
-(module `github.com/ironflock/nexus/v3`, branch `v4-contrib`) — the code
+(module `github.com/ironflock/nexus/v3`, branch `main`) — the code
 [ironflock-router](https://github.com/IronFlock/ironflock-router) is built on. It is an ordinary
 dependency: `go get` pulls the pinned fork commit, and no `replace` is needed in your module.
 `go install` and `go run` with a version (`pkg@latest`) work too.
@@ -96,18 +96,23 @@ ifl.Call(ctx, "com.example.proc", 1, 2, ironflock.Kwargs{"scale": 10})          
 A table write's row is its first positional argument: the data backend reads the columns from there, and from
 the keyword arguments only where the table's data template maps a column to them (`path: kwargs.<key>`).
 
-Values can be maps, slices and scalars, or structs. They are converted by the rules of `encoding/json` —
-struct fields named by their `json` tags, with `omitempty`, `omitzero`, `-`, `,string` and embedded structs,
-and `MarshalJSON`/`MarshalText` methods used where `encoding/json` uses them (also on a nil pointer in a field
-of type `json.Marshaler` or `encoding.TextMarshaler`; where the method would panic, null is sent) — so the
-platform receives the shape Python and JavaScript apps send. Three things differ from `encoding/json`, as in
-the Python SDK:
+Values can be maps, slices and scalars, or structs. They are converted by the rules of `encoding/json` as of
+Go 1.27 — struct fields named by their `json` tags, with `omitempty`, `omitzero`, `-`, `,string`, `,embed` and
+embedded structs; map keys that are strings, numbers, or values with a `MarshalText` or `AppendText` method (a
+map whose keys are no strings, such as `bool` or struct keys, can be sent only empty); and `MarshalJSONTo`,
+`MarshalJSON`, `AppendText` and `MarshalText` methods used where `encoding/json` uses them (also on a nil
+pointer in a field of type `json.Marshaler`, `encoding.TextAppender` or `encoding.TextMarshaler`; where the
+method would panic, null is sent) — so the platform receives the shape Python and JavaScript apps send. Four
+things differ from `encoding/json`, the first three as in the Python SDK:
 
 - Floats stay floats: `2.0` is not sent as the integer `2`, and NaN and ±Inf are sent as they are.
 - `[]byte` is sent as binary (msgpack bin, like Python `bytes`), not as a base64 string.
 - Every `time.Time` becomes an RFC 3339 string in UTC (`"2026-01-02T03:04:05.123Z"`) wherever it is: a value
   or a map key, behind a pointer, in an interface, or embedded in a struct (which `encoding/json` encodes as
   that time). Map keys naming the same instant become one entry.
+- A struct with an unexported embedded struct named by its tag (``inner `json:"x"` ``) whose marshal or
+  unmarshal method, or `IsZero` with `omitzero`, cannot be called on it is refused with an error naming the
+  field: `encoding/json` leaves such a field out, silently dropping its data.
 
 As with `encoding/json`, a nil slice or map — `Row(nil)` included — is sent as null; use `[]any{}` or
 `map[string]any{}` for an empty list or object.
@@ -209,7 +214,8 @@ Publishes **many rows in a single message** (bulk insert) to `bulk.<SWARM_KEY>.<
 platform inserts the batch atomically (all-or-nothing), and drops a batch it refuses as `PublishToTable` drops
 a row. `rows` is a non-empty slice of rows (`[]Row`, `[]map[string]any`, or a slice of structs), each encoded
 exactly as `PublishToTable` encodes a row and carrying its own `tsp`. (A row is taken as a value, as by
-`PublishToTable`: a `MarshalJSON` or `MarshalText` method with a pointer receiver is used for `[]*T` only.)
+`PublishToTable`: a `MarshalJSON`, `MarshalText` or other marshal method with a pointer receiver is used for
+`[]*T` only.)
 
 ```go
 err := ifl.PublishRowsToTable(ctx, "sensordata", []ironflock.Row{

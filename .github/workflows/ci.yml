@@ -29,13 +29,10 @@ jobs:
       - name: go.mod and go.sum are tidy
         run: go mod tidy -diff
       - uses: golangci/golangci-lint-action@v9
-        env:
-          # golangci-lint v2.14 needs Go >= 1.26 to build, newer than go.mod's
-          # go line; setup-go pins GOTOOLCHAIN=local, so let `go install` fetch
-          # that toolchain. Linting itself still runs against go.mod's Go.
-          GOTOOLCHAIN: auto
         with:
           version: v2.14.0
+          # Build golangci-lint with go.mod's toolchain (set up above): the
+          # prebuilt binaries are built with go1.26 and cannot load Go 1.27 code.
           install-mode: goinstall
 
   harness:

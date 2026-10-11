@@ -202,8 +202,8 @@ func bulkParams(table string, rows any, kwargs []Kwargs) (string, []any, map[str
 // refuses is dropped without a word to the publisher.
 //
 // Each row is encoded exactly as PublishToTable encodes it: taken as a value,
-// so MarshalJSON and MarshalText methods with pointer receivers are not used;
-// pass a []*T to use them.
+// so marshal methods (MarshalJSON, MarshalText, ...) with pointer receivers
+// are not used; pass a []*T to use them.
 func (f *IronFlock) PublishRowsToTable(ctx context.Context, table string, rows any, kwargs ...Kwargs) error {
 	t, batch, kw, err := bulkParams(table, rows, kwargs)
 	if err != nil {

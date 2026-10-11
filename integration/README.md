@@ -53,14 +53,13 @@ starts the harness, runs the Python reference, package `wamp`'s real-router test
 it, and stops the harness again.
 
 **Building the router.** `just router-build SRC [OUT] [REF]` builds `REF` (default `HEAD`) of the ironflock-router
-checkout `SRC` into `OUT` (default `integration/ironflock-router/.bin/ironflock-router`, ignored by git). It is needed
-because the router's `go.mod` (v0.8.1) replaces nexus with a path on its maintainer's machine and its own `just build`
-requires a `../../nexus` checkout on branch `v4-contrib`: the recipe builds a `git archive` of the ref in a temporary
-directory with that replace pointed at the nexus fork commit this SDK pins (its `go.mod` replace line), so the
-checkout is left untouched (`go mod tidy` needs the module proxy unless the modules are cached). Binary mode on macOS
-needs such a build; the image's binary is Linux-only. To build the image yourself, run
-`docker buildx build --build-context nexus=/path/to/nexus -t ironflock-router:dev --load .` in an ironflock-router
-checkout (its Dockerfile explains the `nexus` context, a checkout of RecordEvolution's nexus fork).
+checkout `SRC` into `OUT` (default `integration/ironflock-router/.bin/ironflock-router`, ignored by git). It builds
+a `git archive` of the ref in a temporary directory against the nexus fork version this SDK pins, so the checkout is
+left untouched (`go mod tidy` needs the module proxy unless the modules are cached). Router refs from v0.8.2 on
+require `github.com/ironflock/nexus/v3` directly; older refs still replace upstream nexus with a local path, and the
+recipe points that replace at the last fork commit with the upstream module path. Binary mode on macOS needs such a
+build; the image's binary is Linux-only. To build the image yourself, run
+`docker buildx build -t ironflock-router:dev --load .` in an ironflock-router checkout.
 
 ## Step by step
 
