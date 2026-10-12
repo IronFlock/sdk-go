@@ -201,6 +201,12 @@ The row needs a `tsp`: the data backend drops a row without one, with nothing bu
 `error-logs` table to show for it. A row it refuses for lack of storage is dropped without even that (the
 `error-logs` table notes only when the appliance's disk runs full). `AppendToTable` reports such refusals.
 
+On a table with an entity key (`maintainLatestFlagFor` in the data template), a row may carry just the entity key,
+`tsp` and the columns that change: a column the row leaves out keeps the entity's previous value, and a `nil` value
+(in an `ironflock.Row`, or a `nil` pointer field) is sent as null and clears the column. A struct field tagged
+`omitempty` or `omitzero` is left out when it is empty, so it keeps the old value instead of clearing it. This
+holds for all four table write methods. On a table without an entity key, a left-out column is stored as `NULL`.
+
 ### `AppendToTable(ctx, table, args ...any) (*Result, error)`
 
 Appends a row by calling the table's append procedure `append.<SWARM_KEY>.<APP_KEY>.<table>` and returns the
