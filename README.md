@@ -1,7 +1,7 @@
 # ironflock-go
 
 The Go SDK of the [IronFlock](https://www.ironflock.com) IoT DevOps platform — the Go counterpart of
-[ironflock-py](https://github.com/RecordEvolution/ironflock-py) and
+[ironflock-py](https://github.com/IronFlock/sdk-py) and
 [ironflock-js](https://github.com/RecordEvolution/ironflock-js), with the same functionality.
 
 ## About
