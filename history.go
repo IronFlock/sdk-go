@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/RecordEvolution/ironflock-go/internal/jsontext"
+	"github.com/ironflock/sdk-go/internal/jsontext"
 )
 
 // validateReadTable checks the name of a table or transform to read: non-empty

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 func TestOperationErrorMessages(t *testing.T) {

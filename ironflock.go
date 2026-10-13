@@ -48,9 +48,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/filestore"
-	"github.com/RecordEvolution/ironflock-go/internal/env"
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/filestore"
+	"github.com/ironflock/sdk-go/internal/env"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // Aliases of the connection-level types, so most apps need only this package.

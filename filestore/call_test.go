@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // Failures arrive inside a successful WAMP result, so a call that ignored

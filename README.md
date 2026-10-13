@@ -2,7 +2,7 @@
 
 The Go SDK of the [IronFlock](https://www.ironflock.com) IoT DevOps platform — the Go counterpart of
 [ironflock-py](https://github.com/IronFlock/sdk-py) and
-[ironflock-js](https://github.com/RecordEvolution/ironflock-js), with the same functionality.
+[ironflock-js](https://github.com/IronFlock/sdk-js), with the same functionality.
 
 ## About
 
@@ -19,7 +19,7 @@ app user's fleet.
 ## Installation
 
 ```shell
-go get github.com/RecordEvolution/ironflock-go
+go get github.com/ironflock/sdk-go
 ```
 
 ### WAMP library
@@ -40,7 +40,7 @@ import (
 	"log"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
+	ironflock "github.com/ironflock/sdk-go"
 )
 
 func main() {

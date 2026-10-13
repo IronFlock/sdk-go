@@ -553,7 +553,7 @@ func interestingGoroutines() map[string]string {
 		for _, line := range strings.Split(g, "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "github.com/ironflock/nexus/") ||
-				(strings.HasPrefix(line, "github.com/RecordEvolution/ironflock-go/wamp.") &&
+				(strings.HasPrefix(line, "github.com/ironflock/sdk-go/wamp.") &&
 					!strings.Contains(line, "wamp.Test") && !strings.Contains(line, "_test.go")) {
 				relevant = true
 			}

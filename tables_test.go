@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 var bg = context.Background()

@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	ironflock "github.com/ironflock/sdk-go"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // startIronFlock creates and starts an IronFlock against the fake platform.

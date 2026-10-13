@@ -1,4 +1,4 @@
-module github.com/RecordEvolution/ironflock-go
+module github.com/ironflock/sdk-go
 
 go 1.27.2
 

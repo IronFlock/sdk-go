@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RecordEvolution/ironflock-go/internal/env"
+	"github.com/ironflock/sdk-go/internal/env"
 )
 
 // The device agent writes /data/env readable by root only. An app container

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // Cross-app procedures on the app's own realm.

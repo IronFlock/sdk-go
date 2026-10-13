@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/internal/finite"
-	"github.com/RecordEvolution/ironflock-go/internal/jsontext"
+	"github.com/ironflock/sdk-go/internal/finite"
+	"github.com/ironflock/sdk-go/internal/jsontext"
 )
 
 // Event is one event delivered to a subscription handler.

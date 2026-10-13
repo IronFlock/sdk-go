@@ -30,7 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // WAMP procedures of the file service. The namespace is an argument, not a

@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/RecordEvolution/ironflock-go/internal/env"
+	"github.com/ironflock/sdk-go/internal/env"
 )
 
 // defaultTunnelDomain is the public tunnel edge of the IronFlock cloud.

@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
-	"github.com/RecordEvolution/ironflock-go/filestore"
+	ironflock "github.com/ironflock/sdk-go"
+	"github.com/ironflock/sdk-go/filestore"
 )
 
 // stepOut is what one scenario step produced: the payloads the fake platform

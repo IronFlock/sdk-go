@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/RecordEvolution/ironflock-go/internal/jsontext"
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/internal/jsontext"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // Procedure of the (not yet served) device location service.

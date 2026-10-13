@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/RecordEvolution/ironflock-go/internal/env"
+	"github.com/ironflock/sdk-go/internal/env"
 )
 
 // remoteFlock is an IronFlock with device key 42 and app name MyApp.

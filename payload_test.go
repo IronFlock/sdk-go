@@ -2400,7 +2400,7 @@ func (g *pjRandom) structType(depth int) reflect.Type {
 			}
 			f = reflect.StructField{Name: fmt.Sprintf("E%d", i), Type: et, Anonymous: true}
 		case k == 2: // unexported
-			f = reflect.StructField{Name: fmt.Sprintf("u%d", i), PkgPath: "github.com/RecordEvolution/ironflock-go", Type: g.typ(depth + 1)}
+			f = reflect.StructField{Name: fmt.Sprintf("u%d", i), PkgPath: "github.com/ironflock/sdk-go", Type: g.typ(depth + 1)}
 		default:
 			name := pjFieldNames[r.IntN(len(pjFieldNames))]
 			if used[name] {

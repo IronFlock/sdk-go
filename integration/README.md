@@ -372,7 +372,7 @@ read the `eu.gcr.io` repository (location `europe`), and a provider in the exist
 PROJECT_ID=record-1283
 PROJECT_NUMBER=615643915869          # gcloud projects describe record-1283 --format='value(projectNumber)'
 POOL=github-pool                     # the existing pool for GitHub Actions
-REPO=RecordEvolution/ironflock-go
+REPO=IronFlock/sdk-go
 REPO_ID=$(gh api "repos/$REPO" --jq .id)   # numeric and never reused, unlike the name
 PROVIDER=ironflock-go
 SA_NAME=ironflock-go-router-pull

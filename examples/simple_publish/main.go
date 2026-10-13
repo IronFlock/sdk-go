@@ -10,7 +10,7 @@ import (
 	"log"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
+	ironflock "github.com/ironflock/sdk-go"
 )
 
 func main() {

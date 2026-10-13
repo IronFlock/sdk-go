@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/internal/env"
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/internal/env"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 func TestNewReadsTheInjectedEnvironment(t *testing.T) {

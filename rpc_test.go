@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 func TestCallSendsArgumentsWithoutMetadata(t *testing.T) {

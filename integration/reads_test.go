@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	ironflock "github.com/ironflock/sdk-go"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // hook calls a test hook of the fake platform and returns its result.

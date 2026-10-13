@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
-	"github.com/RecordEvolution/ironflock-go/filestore"
+	ironflock "github.com/ironflock/sdk-go"
+	"github.com/ironflock/sdk-go/filestore"
 )
 
 func main() {

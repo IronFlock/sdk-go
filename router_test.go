@@ -20,7 +20,7 @@ import (
 	"github.com/ironflock/nexus/v3/router/auth"
 	nxwamp "github.com/ironflock/nexus/v3/wamp"
 
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // Tests against a real wamp.Connection and an in-process nexus router.

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/RecordEvolution/ironflock-go/internal/jsontext"
-	"github.com/RecordEvolution/ironflock-go/wamp"
+	"github.com/ironflock/sdk-go/internal/jsontext"
+	"github.com/ironflock/sdk-go/wamp"
 )
 
 // ErrInvalidArgument is wrapped by every error about invalid parameters

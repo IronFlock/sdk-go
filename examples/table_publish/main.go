@@ -9,7 +9,7 @@ import (
 	"math/rand/v2"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
+	ironflock "github.com/ironflock/sdk-go"
 )
 
 // Reading is a row of the "sensordata" table declared in the app's data

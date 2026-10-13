@@ -19,8 +19,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/RecordEvolution/ironflock-go/internal/finite"
-	"github.com/RecordEvolution/ironflock-go/internal/jsontext"
+	"github.com/ironflock/sdk-go/internal/finite"
+	"github.com/ironflock/sdk-go/internal/jsontext"
 )
 
 // Row is one table row: column name to value.

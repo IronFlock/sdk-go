@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	ironflock "github.com/RecordEvolution/ironflock-go"
+	ironflock "github.com/ironflock/sdk-go"
 )
 
 // Reading is a row of the "sensordata" table; columns are matched by the json
