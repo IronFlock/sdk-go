@@ -125,7 +125,7 @@ func TestCrossSDKScenario(t *testing.T) {
 		return r.Value(), err
 	})
 	step("report_error_publish", func() (any, error) {
-		return ifl.ReportError(ctx, "Sensor timed out", ironflock.ReportErrorOptions{Level: ironflock.LevelWarn, Tsp: "2026-01-01T00:00:00Z"})
+		return ifl.ReportError(ctx, "Sensor timed out", ironflock.ReportErrorOptions{Level: ironflock.LevelWarning, Tsp: "2026-01-01T00:00:00Z"})
 	})
 	step("report_error_append", func() (any, error) {
 		r, err := ifl.ReportError(ctx, "Calibration failed", ironflock.ReportErrorOptions{
