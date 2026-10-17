@@ -23,8 +23,8 @@ import (
 	nxwamp "github.com/ironflock/nexus/v3/wamp"
 )
 
-// Tests against a real router: ironflock-router with the fake platform, as
-// integration/ironflock-router/start.sh runs them. They run only when
+// Tests against a real router: the IronFlock router with the fake platform, as
+// integration/router/start.sh runs them. They run only when
 // IRONFLOCK_TEST_ROUTER_URL is set, e.g. to ws://localhost:18082/ws-ua-usr.
 //
 // The connection joins realm-2-26-dev with the harness's per-app credential
@@ -38,12 +38,12 @@ const realRouterRealm = "realm-2-26-dev"
 
 // realRouterCredential returns the harness's per-app credential of device
 // 42 for app 26 (DEV), as the device agent writes it into /data/env: the
-// files in integration/ironflock-router/perapp_env, read as the SDK reads
+// files in integration/router/perapp_env, read as the SDK reads
 // /data/env.
 func realRouterCredential(t *testing.T) (authID, secret string) {
 	t.Helper()
 	read := func(name string) string {
-		data, err := os.ReadFile(filepath.Join("..", "integration", "ironflock-router", "perapp_env", name+".txt"))
+		data, err := os.ReadFile(filepath.Join("..", "integration", "router", "perapp_env", name+".txt"))
 		if err != nil {
 			t.Fatalf("the harness's per-app credential: %v", err)
 		}

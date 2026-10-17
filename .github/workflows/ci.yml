@@ -53,11 +53,11 @@ jobs:
       - name: Fake platform against the contract tables
         run: python -I integration/test_fake_platform.py -v
       - name: Harness scripts
-        run: integration/ironflock-router/test_scripts.sh
+        run: integration/router/test_scripts.sh
       - name: Shellcheck
         if: matrix.python == '3.14'
         run: |
-          shellcheck -x --source-path=SCRIPTDIR integration/ironflock-router/*.sh integration/contracts/regen.sh
+          shellcheck -x --source-path=SCRIPTDIR integration/router/*.sh integration/contracts/regen.sh
       - name: Install the Python SDK (brings autobahn for the fake platform)
         run: python -m pip install ironflock==1.9.1
       - name: The fake platform starts
@@ -76,7 +76,7 @@ jobs:
           kill "$pid"
 
   integration:
-    # End-to-end against the ironflock-router image and a fake IronFlock
+    # End-to-end against the router image and a fake IronFlock
     # platform (integration/README.md); the Python SDK's run of the same
     # scenario is the wire-level reference. Pulling the image from Artifact
     # Registry needs workload identity federation: the job runs once the
@@ -93,7 +93,7 @@ jobs:
       contents: read
       id-token: write
     env:
-      ROUTER_IMAGE: ${{ vars.ROUTER_IMAGE || 'europe-docker.pkg.dev/record-1283/eu.gcr.io/ironflock-router:v0.8.1' }}
+      ROUTER_IMAGE: ${{ vars.ROUTER_IMAGE || 'europe-docker.pkg.dev/record-1283/eu.gcr.io/router:v0.8.7' }}
       PYTHON: python
       IRONFLOCK_TEST_PLATFORM_URL: ws://localhost:18082/ws-ua-usr
     steps:
@@ -119,8 +119,8 @@ jobs:
           registry: europe-docker.pkg.dev
           username: oauth2accesstoken
           password: ${{ steps.gcp.outputs.access_token }}
-      - name: Start ironflock-router and the fake platform
-        run: integration/ironflock-router/start.sh
+      - name: Start the router and the fake platform
+        run: integration/router/start.sh
       - name: Python reference run
         env:
           # The device identity the fake platform admits.
@@ -132,7 +132,7 @@ jobs:
           APP_NAME: interop
           DEVICE_NAME: interop-dev
         run: |
-          cp -R integration/ironflock-router/perapp_env "$RUNNER_TEMP/perapp_env"
+          cp -R integration/router/perapp_env "$RUNNER_TEMP/perapp_env"
           IRONFLOCK_ENV_DIR="$RUNNER_TEMP/perapp_env" python -I integration/py_scenario.py "$RUNNER_TEMP/py_reference.json"
       - name: Real-router tests of package wamp
         env:
@@ -140,19 +140,19 @@ jobs:
         run: go test -race -count=1 -run TestRealRouter -v ./wamp/
       - name: Integration tests
         env:
-          IRONFLOCK_TEST_ENV_DIR: ${{ github.workspace }}/integration/ironflock-router/perapp_env
+          IRONFLOCK_TEST_ENV_DIR: ${{ github.workspace }}/integration/router/perapp_env
           IRONFLOCK_TEST_REFERENCE: ${{ runner.temp }}/py_reference.json
           IRONFLOCK_TEST_PYTHON: python
           # Relative to integration/, where go test runs the test.
-          IRONFLOCK_TEST_RESTART_ROUTER: ironflock-router/restart.sh
+          IRONFLOCK_TEST_RESTART_ROUTER: router/restart.sh
         run: go test -tags integration -race -count=1 -v ./integration/...
       - name: Stop the harness
         if: always()
-        run: integration/ironflock-router/stop.sh
+        run: integration/router/stop.sh
       - name: Harness logs
         if: failure()
         run: |
           for log in router fake_platform; do
-            f="integration/ironflock-router/.run/$log.log"
+            f="integration/router/.run/$log.log"
             if [ -f "$f" ]; then echo "::group::$log.log"; tail -n 300 "$f"; echo "::endgroup::"; fi
           done

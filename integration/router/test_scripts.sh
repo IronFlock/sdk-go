@@ -2,7 +2,7 @@
 # Checks the harness scripts' path handling without a router or Docker (CI
 # runs it in the harness job):
 #
-#   integration/ironflock-router/test_scripts.sh [HARNESS_DIR]
+#   integration/router/test_scripts.sh [HARNESS_DIR]
 #
 # HARNESS_DIR defaults to this script's directory (another copy of start.sh
 # and lib.sh can be checked by naming it).

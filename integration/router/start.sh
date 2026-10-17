@@ -4,10 +4,10 @@
 #
 # The router comes from a binary or from an image:
 #
-#   ROUTER_BIN=/path/to/ironflock-router \
-#   ROUTER_REF_CONFIG=/path/to/ironflock-router/examples/config.yaml ./start.sh
+#   ROUTER_BIN=/path/to/router \
+#   ROUTER_REF_CONFIG=/path/to/router/examples/config.yaml ./start.sh
 #
-#   ROUTER_IMAGE=europe-docker.pkg.dev/record-1283/eu.gcr.io/ironflock-router:v0.8.1 ./start.sh
+#   ROUTER_IMAGE=europe-docker.pkg.dev/record-1283/eu.gcr.io/router:v0.8.7 ./start.sh
 #
 # ROUTER_REF_CONFIG is the router's reference config, the source of the
 # production roles. With ROUTER_IMAGE it is optional: by default it is copied
@@ -48,7 +48,7 @@ if [ -n "${ROUTER_IMAGE:-}" ]; then
 else
   ROUTER_SOURCE=binary
   ROUTER_IMAGE=
-  bin="$(absolute "${ROUTER_BIN:-ironflock-router}" 2>/dev/null || true)"
+  bin="$(absolute "${ROUTER_BIN:-router}" 2>/dev/null || true)"
   if [ -z "$bin" ] || [ ! -x "$bin" ]; then
     die "no router: set ROUTER_BIN to an ironflock-router binary or ROUTER_IMAGE to its image"
   fi

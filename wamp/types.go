@@ -173,7 +173,7 @@ const (
 // URIAuthorizationFailed, URIAuthenticationFailed or URINoAuthMethod.
 //
 // Such a refusal is usually lasting: retrying succeeds only once the
-// credential or grant changes. But ironflock-router also refuses with
+// credential or grant changes. But the router also refuses with
 // URIAuthenticationFailed ("invalid signature") while it cannot verify a
 // credential — its authenticator or database fails — and retrying succeeds
 // once that has passed; a revoked grant and such an outage look the same.

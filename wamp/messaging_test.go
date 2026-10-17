@@ -443,7 +443,7 @@ func failedRestore(t *testing.T, tr *testRouter, c *Connection, connects <-chan 
 }
 
 // A restore the router refuses is retried while the session stays up:
-// ironflock-router refuses a REGISTER of a device function, for one, while
+// the router refuses a REGISTER of a device function, for one, while
 // its identity check cannot reach the authorizer (it fails closed), and an
 // entry refused at restore was accepted before (finding 40).
 func TestFailedRestoreIsRetriedWhileTheSessionLasts(t *testing.T) {

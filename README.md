@@ -26,7 +26,7 @@ go get github.com/ironflock/sdk-go
 
 The SDK speaks WAMP through IronFlock's fork of [nexus](https://github.com/IronFlock/nexus)
 (module `github.com/ironflock/nexus/v3`, branch `main`) — the code
-[ironflock-router](https://github.com/IronFlock/ironflock-router) is built on. It is an ordinary
+the [IronFlock router](https://github.com/IronFlock/router) is built on. It is an ordinary
 dependency: `go get` pulls the fork release this module pins (v3.4.2), and no `replace` is needed in your module.
 `go install` and `go run` with a version (`pkg@latest`) work too.
 
@@ -927,7 +927,7 @@ it takes the more robust variant; Go-specific choices:
   inside them.
 - Liveness uses WebSocket pings (as Python); the JavaScript SDK uses a WAMP heartbeat because browsers have no
   ping API.
-- There are no retained-event options (`get_retained`, `retain`): ironflock-router does not keep retained
+- There are no retained-event options (`get_retained`, `retain`): the router does not keep retained
   events. Raw WAMP options still pass through the `Extra` of `SubscribeOptions`, `RegisterOptions` and
   `CallOptions`, and of `wamp.PublishOptions`, which only `ifl.Connection().Publish` takes.
 - `GetSeriesHistory` takes a method per metric (`SeriesMetric`), the series query of fleetdb v1.0.58 and later.
@@ -943,11 +943,11 @@ it takes the more robust variant; Go-specific choices:
 just test               # unit tests with the race detector (go test -race -count=1 ./...)
 just check              # go vet, golangci-lint, cross-builds for the device platforms, go mod tidy -diff
 just coverage           # unit test coverage summary
-just test-integration   # end-to-end suites against ironflock-router (ROUTER_IMAGE, or ROUTER_BIN and ROUTER_REF_CONFIG)
+just test-integration   # end-to-end suites against the router (ROUTER_IMAGE, or ROUTER_BIN and ROUTER_REF_CONFIG)
 ```
 
 The unit tests need nothing external: they run against an in-process nexus router. The end-to-end tests run
-against [ironflock-router](https://github.com/IronFlock/ironflock-router) and a fake IronFlock platform,
+against the [router](https://github.com/IronFlock/router) and a fake IronFlock platform,
 call across to the Python SDK, and compare the wire payloads with the Python SDK's run of the same scenario.
 They live in [integration/](integration), whose README covers the harness, the environment variables and CI;
 the [Justfile](Justfile) lists every task.

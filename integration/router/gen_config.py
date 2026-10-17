@@ -1,7 +1,7 @@
 """Writes $STATE_DIR/config.yaml from config.template.yaml, copying role blocks
 verbatim from the router's reference config ($ROUTER_REF_CONFIG, the router's
 examples/config.yaml; the router image ships it as
-/etc/ironflock-router/config.yaml). start.sh runs it.
+/etc/router/config.yaml). start.sh runs it.
 
   #@ROLE <name>   -> the whole `- name: <name>` block (name, description,
                      permissions), byte-for-byte
@@ -16,7 +16,7 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REF = os.environ.get("ROUTER_REF_CONFIG") or sys.exit("set ROUTER_REF_CONFIG to ironflock-router/examples/config.yaml")
+REF = os.environ.get("ROUTER_REF_CONFIG") or sys.exit("set ROUTER_REF_CONFIG to router/examples/config.yaml")
 TEMPLATE = os.path.join(HERE, "config.template.yaml")
 OUT = os.path.join(os.environ.get("STATE_DIR") or os.path.join(HERE, ".run"), "config.yaml")
 

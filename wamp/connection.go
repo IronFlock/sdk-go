@@ -119,7 +119,7 @@ type Config struct {
 	// Before the connection has been established a denial is fatal at once,
 	// and Start returns the *AuthError. Once it has been established, a
 	// denial is fatal only when it persists — 3 refusals or more since the
-	// last join, the first one at least 60s ago — since ironflock-router
+	// last join, the first one at least 60s ago — since the router
 	// refuses the same way while it cannot verify access (see
 	// IsFatalAuthReason); until then the connection reconnects as after any
 	// other failure. FailOnAuthError also bounds Start by
@@ -171,7 +171,7 @@ type Config struct {
 // restored. One that fails to restore stays tracked and is retried while the
 // session lasts — after 1s, doubling up to 30s, with ±15% jitter: the
 // router accepted it before, so its refusal is a passing one, such as
-// ironflock-router's identity check failing closed while its authorizer is
+// the router's identity check failing closed while its authorizer is
 // unavailable — and again after every reconnect.
 //
 // Contexts: every operation waits for a session within its context (and its

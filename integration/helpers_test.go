@@ -1,6 +1,6 @@
 //go:build integration
 
-// Package integration holds end-to-end tests against ironflock-router and a
+// Package integration holds end-to-end tests against the router and a
 // fake IronFlock platform (see README.md in this directory). They are
 // excluded from normal builds; run them with
 //

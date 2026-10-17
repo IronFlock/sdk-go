@@ -420,7 +420,7 @@ func denialGrace(grace time.Duration) connOption {
 }
 
 // Once a FailOnAuthError connection has been established, a refusal is not
-// final at once: ironflock-router refuses with authentication_failed also
+// final at once: the router refuses with authentication_failed also
 // while it cannot verify the credential (an authenticator or database
 // outage). A refusal that passes is ridden out like any reconnect (finding
 // 20).

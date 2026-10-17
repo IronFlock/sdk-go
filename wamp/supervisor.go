@@ -521,7 +521,7 @@ func (c *Connection) restoreRegistration(s *session, r *Registration) error {
 
 // retryRestore retries, while the session s lasts, the entries its restore
 // failed to restore. A router refuses such a restore only for a passing
-// reason — the entries were accepted before — such as ironflock-router's
+// reason — the entries were accepted before — such as the router's
 // identity check of a device function failing closed while its authorizer
 // is slow or unavailable; without retries the entry would stay inactive
 // until the next reconnect, which a stable link may never bring. Attempts

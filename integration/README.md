@@ -1,6 +1,6 @@
 # Integration and conformance tests
 
-End-to-end tests of the Go SDK against [ironflock-router](https://github.com/RecordEvolution/ironflock-router), the
+End-to-end tests of the Go SDK against the [IronFlock router](https://github.com/IronFlock/router), the
 IronFlock platform's WAMP router, and a fake IronFlock platform, plus a cross-SDK conformance check that the Go,
 Python and JavaScript SDKs put the same messages on the wire. They are behind the `integration` build tag and skip
 unless their environment is configured.
@@ -20,9 +20,9 @@ run use it.
 | `fake_platform.py` | Joins the router's service listener as the platform's services: app 26's data backend on `realm-2-26-dev` (fleetdb and fleetfiles, with an S3-compatible store for presigned URLs), a provider app's backend on `realm-2-77-dev`, and ironflock-auth on `ironflock.auth` (the `identity` authorizer callout `auth.authorize` and the dynamic WAMP-CRA authenticator `auth.userapp.authenticate`). Holds the harness data (templates, fixture rows, file namespaces) and records every payload an SDK sends it. Test hooks below |
 | `fake_fleetdb.py`, `fake_fleetfiles.py`, `fake_auth.py` | The models behind it: ports of the real services' request checks, refusals and answers (standard library only; each names its pinned source) |
 | `test_fake_platform.py`, `contracts/` | Offline self-test: the models against the verdicts the real services gave for the same inputs (contract tables, see [contracts/README.md](contracts/README.md)), the credential fixture, and the backend behaviors the tests rely on |
-| `ironflock-router/start.sh`, `stop.sh`, `restart.sh` | Start the router (binary or image) and the fake platform; stop both; restart only the router (an outage of a few seconds, for `TestRouterRestartRecovery`). `lib.sh` holds their shared code, `test_scripts.sh` checks their path handling |
-| `ironflock-router/config.template.yaml`, `gen_config.py` | The router config. `gen_config.py` copies the production `app`, `app_reader` and `svc_auth` roles, and the fleetdb and fleetfiles rules the fake platform's role combines, byte-for-byte from the router's reference config |
-| `ironflock-router/perapp_env/` | The per-app credential (`APP_AUTH_ID.txt`, `APP_AUTH_SECRET.txt`) of app 26 on the harness's device, in the format and with the derivation the device agent uses, written as it writes them to `/data/env` (no trailing newline). The Go suites and package `wamp`'s `TestRealRouter` connect with it |
+| `router/start.sh`, `stop.sh`, `restart.sh` | Start the router (binary or image) and the fake platform; stop both; restart only the router (an outage of a few seconds, for `TestRouterRestartRecovery`). `lib.sh` holds their shared code, `test_scripts.sh` checks their path handling |
+| `router/config.template.yaml`, `gen_config.py` | The router config. `gen_config.py` copies the production `app`, `app_reader` and `svc_auth` roles, and the fleetdb and fleetfiles rules the fake platform's role combines, byte-for-byte from the router's reference config |
+| `router/perapp_env/` | The per-app credential (`APP_AUTH_ID.txt`, `APP_AUTH_SECRET.txt`) of app 26 on the harness's device, in the format and with the derivation the device agent uses, written as it writes them to `/data/env` (no trailing newline). The Go suites and package `wamp`'s `TestRealRouter` connect with it |
 | `py_scenario.py`, `js_scenario.mjs` | The conformance scenario with the Python and JavaScript SDKs: writes, per step, what the platform recorded, what the SDK returned and its error class |
 | `scenario_test.go`, `scenario_divergences.json` | The same scenario with the Go SDK; compares the recorded wire payloads and error classes with a reference run, except for the steps the divergence list names |
 | `e2e_test.go`, `py_peer.py` | Live tests: device functions called across SDKs, table subscriptions through the platform republish (bulk rows unrolled), cross-app realtime and guards, per-app credential rotation, router restart recovery, keepalive detection of a silently dead link |
@@ -39,12 +39,12 @@ export PYTHON=~/.venvs/ironflock/bin/python
 
 # Router image (pulling it needs read access to record-1283's Artifact Registry and
 # `gcloud auth configure-docker europe-docker.pkg.dev`):
-ROUTER_IMAGE=europe-docker.pkg.dev/record-1283/eu.gcr.io/ironflock-router:v0.8.1 just test-integration
+ROUTER_IMAGE=europe-docker.pkg.dev/record-1283/eu.gcr.io/router:v0.8.7 just test-integration
 
-# Or a router binary built from an ironflock-router checkout, and the reference config from its source tree:
-just router-build /path/to/ironflock-router
-ROUTER_BIN=integration/ironflock-router/.bin/ironflock-router \
-ROUTER_REF_CONFIG=/path/to/ironflock-router/examples/config.yaml \
+# Or a router binary built from a router checkout, and the reference config from its source tree:
+just router-build /path/to/router
+ROUTER_BIN=integration/router/.bin/router \
+ROUTER_REF_CONFIG=/path/to/router/examples/config.yaml \
   just test-integration
 ```
 
@@ -52,14 +52,14 @@ ROUTER_REF_CONFIG=/path/to/ironflock-router/examples/config.yaml \
 starts the harness, runs the Python reference, package `wamp`'s real-router tests and the integration suite against
 it, and stops the harness again.
 
-**Building the router.** `just router-build SRC [OUT] [REF]` builds `REF` (default `HEAD`) of the ironflock-router
-checkout `SRC` into `OUT` (default `integration/ironflock-router/.bin/ironflock-router`, ignored by git). It builds
+**Building the router.** `just router-build SRC [OUT] [REF]` builds `REF` (default `HEAD`) of the router
+checkout `SRC` into `OUT` (default `integration/router/.bin/router`, ignored by git). It builds
 a `git archive` of the ref in a temporary directory against the nexus fork version this SDK pins, so the checkout is
 left untouched (`go mod tidy` needs the module proxy unless the modules are cached). Router refs from v0.8.2 on
 require `github.com/ironflock/nexus/v3` directly; older refs still replace upstream nexus with a local path, and the
 recipe points that replace at the last fork commit with the upstream module path. Binary mode on macOS needs such a
 build; the image's binary is Linux-only. To build the image yourself, run
-`docker buildx build -t ironflock-router:dev --load .` in an ironflock-router checkout.
+`docker buildx build -t router:dev --load .` in a router checkout.
 
 ## Step by step
 
@@ -70,15 +70,15 @@ where `go test` runs the test, so it needs no quoting whatever the checkout's pa
 ```shell
 # 1. Router and fake platform. Image instead of binary: ROUTER_IMAGE=... in place of
 #    the two ROUTER_* lines.
-ROUTER_BIN=/path/to/ironflock-router \
-ROUTER_REF_CONFIG=/path/to/ironflock-router/examples/config.yaml \
-  integration/ironflock-router/start.sh
+ROUTER_BIN=/path/to/router \
+ROUTER_REF_CONFIG=/path/to/router/examples/config.yaml \
+  integration/router/start.sh
 
 # 2. Python reference run, with the device identity the fake platform admits and the
 #    per-app credential.
 DEVICE_SERIAL_NUMBER=06a0bf96-a539-4d6a-8471-ac7adc67616e SWARM_KEY=2 APP_KEY=26 ENV=DEV \
 DEVICE_KEY=42 APP_NAME=interop DEVICE_NAME=interop-dev \
-IRONFLOCK_ENV_DIR=$PWD/integration/ironflock-router/perapp_env \
+IRONFLOCK_ENV_DIR=$PWD/integration/router/perapp_env \
 IRONFLOCK_TEST_PLATFORM_URL=ws://localhost:18082/ws-ua-usr \
   "$PYTHON" -I integration/py_scenario.py /tmp/py_reference.json
 
@@ -87,14 +87,14 @@ IRONFLOCK_TEST_PLATFORM_URL=ws://localhost:18082/ws-ua-usr \
 IRONFLOCK_TEST_ROUTER_URL=ws://localhost:18082/ws-ua-usr \
   go test -race -count=1 -run TestRealRouter -v ./wamp/
 IRONFLOCK_TEST_PLATFORM_URL=ws://localhost:18082/ws-ua-usr \
-IRONFLOCK_TEST_ENV_DIR=$PWD/integration/ironflock-router/perapp_env \
+IRONFLOCK_TEST_ENV_DIR=$PWD/integration/router/perapp_env \
 IRONFLOCK_TEST_REFERENCE=/tmp/py_reference.json \
 IRONFLOCK_TEST_PYTHON="$PYTHON" \
-IRONFLOCK_TEST_RESTART_ROUTER=ironflock-router/restart.sh \
+IRONFLOCK_TEST_RESTART_ROUTER=router/restart.sh \
   go test -tags integration -race -count=1 -v ./integration/...
 
 # 4. Stop the router and the fake platform.
-integration/ironflock-router/stop.sh
+integration/router/stop.sh
 ```
 
 The reference run must use the per-app credential, as the Go tests do. Without it the Python SDK falls back to the
@@ -124,13 +124,13 @@ it would deny (`authorizer shadow: would deny`), and the static role rules alone
 **Binary mode** (`ROUTER_BIN`, plus `ROUTER_REF_CONFIG`) runs the router as a background process; its output goes to
 `router.log` in the state directory. **Image mode** (`ROUTER_IMAGE`) needs Docker. It pulls the image if it is not
 present and, unless `ROUTER_REF_CONFIG` is set, copies the reference config out of it
-(`/etc/ironflock-router/config.yaml`, the router's `examples/config.yaml`). The container, named
+(`/etc/router/config.yaml`, the router's `examples/config.yaml`). The container, named
 `ironflock-go-router-<ROUTER_PUBLIC_PORT>`, mounts the generated config read-only and publishes its ports on
 127.0.0.1 only; use `ws://127.0.0.1:...` with a client that does not fall back from `::1` to 127.0.0.1 when it
 resolves `localhost`. Read its log with `docker logs` while it runs; `stop.sh` saves it to `router.log` before it
 removes the container.
 
-The state directory (`STATE_DIR`, default `integration/ironflock-router/.run`, ignored by git) holds the generated
+The state directory (`STATE_DIR`, default `integration/router/.run`, ignored by git) holds the generated
 `config.yaml`, the logs, the PIDs or the container ID, and `harness.env`, the settings `start.sh` used. `stop.sh` and
 `restart.sh` act on the instance recorded there and need no other variables; give them the same `STATE_DIR` when it
 is not the default, also to the test that runs `IRONFLOCK_TEST_RESTART_ROUTER` (export it). `stop.sh` signals a
@@ -145,11 +145,11 @@ A second instance next to a running one needs other ports and its own state dire
 ```shell
 export STATE_DIR=/tmp/ironflock-harness-2
 ROUTER_PUBLIC_PORT=19082 ROUTER_OPS_PORT=19083 ROUTER_INTERNAL_PORT=19084 FAKE_PLATFORM_S3_PORT=19091 \
-ROUTER_IMAGE=europe-docker.pkg.dev/record-1283/eu.gcr.io/ironflock-router:v0.8.1 \
-  integration/ironflock-router/start.sh
+ROUTER_IMAGE=europe-docker.pkg.dev/record-1283/eu.gcr.io/router:v0.8.7 \
+  integration/router/start.sh
 # ... tests with IRONFLOCK_TEST_PLATFORM_URL=ws://localhost:19082/ws-ua-usr and
-#     IRONFLOCK_TEST_RESTART_ROUTER=ironflock-router/restart.sh (STATE_DIR is exported)
-integration/ironflock-router/stop.sh
+#     IRONFLOCK_TEST_RESTART_ROUTER=router/restart.sh (STATE_DIR is exported)
+integration/router/stop.sh
 ```
 
 `gen_config.py --check` proves that the copied roles parse to exactly the reference roles. `start.sh` runs it when
@@ -288,7 +288,7 @@ environment of step 2. (From a container, point `IRONFLOCK_TEST_PLATFORM_URL` at
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ROUTER_BIN` | `ironflock-router` from `PATH` | Router binary (binary mode) |
+| `ROUTER_BIN` | `router` from `PATH` | Router binary (binary mode) |
 | `ROUTER_IMAGE` | | Router image (image mode, needs Docker); set this or `ROUTER_BIN` |
 | `ROUTER_REF_CONFIG` | copied out of the image | The router's reference config, `examples/config.yaml`; required in binary mode |
 | `PYTHON` | `python3` | Python 3.11 or newer with autobahn (`pip install ironflock`); runs the fake platform and `gen_config.py` |
@@ -296,7 +296,7 @@ environment of step 2. (From a container, point `IRONFLOCK_TEST_PLATFORM_URL` at
 | `IDENTITY_AUTHORIZER_MODE` | `enforce` | `enforce` or `shadow` |
 | `ROUTER_PUBLIC_PORT`, `ROUTER_OPS_PORT`, `ROUTER_INTERNAL_PORT`, `FAKE_PLATFORM_S3_PORT` | 18082, 18083, 18084, 18091 | Ports, see above |
 | `IRONFLOCK_LOG_LEVEL` | `info` | The router's log level (`debug`, `info`, `warn`, `error`) |
-| `STATE_DIR` | `integration/ironflock-router/.run` | Generated config, logs, PIDs or container ID, settings (all three scripts) |
+| `STATE_DIR` | `integration/router/.run` | Generated config, logs, PIDs or container ID, settings (all three scripts) |
 | `RESTART_DOWNTIME` | 3 | Seconds `restart.sh` keeps the router down |
 
 ### Go tests
@@ -309,7 +309,7 @@ environment of step 2. (From a container, point `IRONFLOCK_TEST_PLATFORM_URL` at
 | `IRONFLOCK_TEST_OUT` | Where to write the Go run of the scenario |
 | `IRONFLOCK_TEST_PYTHON` | A Python with the `ironflock` package, for the cross-SDK live tests |
 | `IRONFLOCK_TEST_ENV_DIR` | Credential files (`APP_AUTH_ID.txt`, `APP_AUTH_SECRET.txt`) copied into each test's `/data/env` |
-| `IRONFLOCK_TEST_RESTART_ROUTER` | Shell command that restarts the router, run with `bash -c` from `integration/` (`TestRouterRestartRecovery`), e.g. `ironflock-router/restart.sh` |
+| `IRONFLOCK_TEST_RESTART_ROUTER` | Shell command that restarts the router, run with `bash -c` from `integration/` (`TestRouterRestartRecovery`), e.g. `router/restart.sh` |
 
 ### Scenario drivers
 
@@ -350,7 +350,7 @@ environment of step 2. (From a container, point `IRONFLOCK_TEST_PLATFORM_URL` at
   harness and prints its logs on failure. The image comes from Artifact Registry through workload identity federation,
   so the job runs only once both repository variables below are set, and only for pushes and for pull requests from
   this repository: GitHub gives pull requests from forks no OIDC token. The image is the `ROUTER_IMAGE` repository
-  variable, default `europe-docker.pkg.dev/record-1283/eu.gcr.io/ironflock-router:v0.8.1`.
+  variable, default `europe-docker.pkg.dev/record-1283/eu.gcr.io/router:v0.8.7`.
 
 | Repository variable | Meaning |
 | --- | --- |
@@ -389,7 +389,7 @@ gcloud iam workload-identity-pools providers create-oidc "$PROVIDER" \
 
 # 2. The service account, with read access to the eu.gcr.io repository and nothing else.
 gcloud iam service-accounts create "$SA_NAME" \
-  --project="$PROJECT_ID" --display-name="ironflock-go CI: pulls ironflock-router (read-only)"
+  --project="$PROJECT_ID" --display-name="ironflock-go CI: pulls router (read-only)"
 gcloud artifacts repositories add-iam-policy-binding eu.gcr.io \
   --project="$PROJECT_ID" --location=europe \
   --member="serviceAccount:$SA" --role=roles/artifactregistry.reader
@@ -403,9 +403,9 @@ gcloud iam service-accounts add-iam-policy-binding "$SA" \
 gh variable set ROUTER_PULL_WIF_PROVIDER --repo "$REPO" \
   --body "projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$POOL/providers/$PROVIDER"
 gh variable set ROUTER_PULL_SERVICE_ACCOUNT --repo "$REPO" --body "$SA"
-# Optional: another router image (default ...ironflock-router:v0.8.1).
+# Optional: another router image (default ...router:v0.8.7).
 gh variable set ROUTER_IMAGE --repo "$REPO" \
-  --body "europe-docker.pkg.dev/record-1283/eu.gcr.io/ironflock-router:v0.8.1"
+  --body "europe-docker.pkg.dev/record-1283/eu.gcr.io/router:v0.8.7"
 ```
 
 Instead of step 1, the existing provider of the pool can admit this repository too, by extending its attribute

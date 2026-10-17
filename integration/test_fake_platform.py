@@ -81,7 +81,7 @@ class CredentialFixture(unittest.TestCase):
     """perapp_env/ holds the credential the device agent would write."""
 
     def read(self, name):
-        with open(os.path.join(HERE, "ironflock-router", "perapp_env", name), "rb") as f:
+        with open(os.path.join(HERE, "router", "perapp_env", name), "rb") as f:
             return f.read()
 
     def test_fixture_is_the_agent_derivation(self):
@@ -91,7 +91,7 @@ class CredentialFixture(unittest.TestCase):
         self.assertEqual(authid, "app-26-dev-e1@" + SERIAL)
 
     def test_static_mode_user_matches_fixture(self):
-        with open(os.path.join(HERE, "ironflock-router", "config.template.yaml"), encoding="utf-8") as f:
+        with open(os.path.join(HERE, "router", "config.template.yaml"), encoding="utf-8") as f:
             template = f.read()
         line = '{ authid: "%s", role: app, secret: "%s" }' % (self.read("APP_AUTH_ID.txt").decode(),
                                                            self.read("APP_AUTH_SECRET.txt").decode())

@@ -13,8 +13,8 @@ INTEGRATION_DIR="$(cd "$HERE/.." && pwd -P)"
 # The reference config inside the ironflock-router image (the router's
 # examples/config.yaml, copied there by its Dockerfile), and where the
 # generated config is mounted in the container.
-IMAGE_REF_CONFIG=/etc/ironflock-router/config.yaml
-CONTAINER_CONFIG=/etc/ironflock-router/harness.yaml
+IMAGE_REF_CONFIG=/etc/router/config.yaml
+CONTAINER_CONFIG=/etc/router/harness.yaml
 
 # The fake platform's sessions: own data realm, provider realm, auth realm.
 PLATFORM_SESSIONS=3

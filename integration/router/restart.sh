@@ -3,7 +3,7 @@
 # platform (which keeps running) and the SDK under test have to ride out. For
 # TestRouterRestartRecovery:
 #
-#   IRONFLOCK_TEST_RESTART_ROUTER=ironflock-router/restart.sh
+#   IRONFLOCK_TEST_RESTART_ROUTER=router/restart.sh
 #
 # (relative: go test runs the test in integration/, so the command needs no
 # quoting whatever the checkout path; give it STATE_DIR when that is not the

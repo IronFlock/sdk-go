@@ -1,6 +1,6 @@
 """Fake IronFlock platform services for end-to-end SDK tests.
 
-Joins ironflock-router's service listener and serves what the real platform
+Joins the router's service listener and serves what the real platform
 serves on the harness's data realms, following the real services' contracts
 (the models live next to this file, each pinned to a backend version):
 
@@ -16,7 +16,7 @@ serves on the harness's data realms, following the real services' contracts
                    fake_auth.PlatformDB
 
 It records every payload an SDK sends it (before validating it), so tests can
-compare what different SDKs put on the wire. ironflock-router/start.sh starts
+compare what different SDKs put on the wire. router/start.sh starts
 it next to the router; README.md lists what it does not model.
 
 Test hooks (procedures on realm-2-26-dev; nothing here records them):
@@ -57,7 +57,7 @@ Test hooks (procedures on realm-2-26-dev; nothing here records them):
   test.auth.reset()               -> every credential epoch back to 1
   test.authz_log(clear=False)     -> the identity services' verdicts
 
-Environment (defaults = the harness ironflock-router/start.sh runs):
+Environment (defaults = the harness router/start.sh runs):
 
   FAKE_PLATFORM_ROUTER         router URL for the data-realm sessions
                                (default ws://127.0.0.1:18084/ws-svc)

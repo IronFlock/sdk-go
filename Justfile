@@ -2,7 +2,7 @@
 
 # Platforms the SDK must build for (IronFlock devices are often 32-bit ARM).
 targets := "linux/arm linux/arm64 linux/386 windows/amd64 darwin/arm64"
-harness := "integration/ironflock-router"
+harness := "integration/router"
 
 # Run unit tests with the race detector
 test:
@@ -20,19 +20,19 @@ coverage:
 	go test -count=1 -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out | tail -1
 
-# Start the ironflock-router harness (ROUTER_BIN and ROUTER_REF_CONFIG, or ROUTER_IMAGE; see integration/README.md)
+# Start the router harness (ROUTER_BIN and ROUTER_REF_CONFIG, or ROUTER_IMAGE; see integration/README.md)
 router-up:
 	{{harness}}/start.sh
 
-# Build an ironflock-router binary from a checkout (default ref HEAD), against the nexus fork commit this SDK pins
-router-build src out="integration/ironflock-router/.bin/ironflock-router" ref="HEAD":
+# Build a router binary from a checkout (default ref HEAD), against the nexus fork commit this SDK pins
+router-build src out="integration/router/.bin/router" ref="HEAD":
 	#!/usr/bin/env bash
 	set -euo pipefail
 	# Build a copy of the ref against the nexus fork commit this SDK pins,
 	# leaving the checkout untouched.
 	nexus="$(go list -m -f '{{{{.Path}}@{{{{.Version}}' github.com/ironflock/nexus/v3)"
 	out="$(mkdir -p "$(dirname "{{out}}")" && cd "$(dirname "{{out}}")" && pwd -P)/$(basename "{{out}}")"
-	tmp="$(mktemp -d "${TMPDIR:-/tmp}/ironflock-router-build.XXXXXX")"
+	tmp="$(mktemp -d "${TMPDIR:-/tmp}/router-build.XXXXXX")"
 	trap 'rm -rf -- "$tmp"' EXIT
 	git -C "{{src}}" archive "{{ref}}" | tar -x -C "$tmp"
 	cd "$tmp"
@@ -46,15 +46,17 @@ router-build src out="integration/ironflock-router/.bin/ironflock-router" ref="H
 		go mod edit -replace="github.com/gammazero/nexus/v3=$nexus"
 	fi
 	go mod tidy
-	go build -o "$out" ./cmd/ironflock-router
+	# cmd/router since the router repo rename (2026-10-17), cmd/ironflock-router before.
+	cmd=./cmd/router; [ -d cmd/router ] || cmd=./cmd/ironflock-router
+	go build -o "$out" "$cmd"
 	echo "built $out ($(git -C "{{src}}" describe --tags --always "{{ref}}"), nexus $nexus)"
 
 # Offline checks of the integration harness: the fake platform against the real services' contract tables, and the scripts
 test-harness:
 	"${PYTHON:-python3}" -I integration/test_fake_platform.py
-	integration/ironflock-router/test_scripts.sh
+	integration/router/test_scripts.sh
 
-# Stop the ironflock-router harness
+# Stop the router harness
 router-down:
 	{{harness}}/stop.sh
 
@@ -64,7 +66,7 @@ test-integration: test-harness
 	set -euo pipefail
 	harness="$PWD/{{harness}}"
 	# Absolute, so that restart.sh (run from integration/ by the test, as
-	# ironflock-router/restart.sh) finds the instance.
+	# router/restart.sh) finds the instance.
 	mkdir -p "${STATE_DIR:=$harness/.run}"
 	STATE_DIR="$(cd "$STATE_DIR" && pwd -P)"
 	export STATE_DIR
@@ -90,5 +92,5 @@ test-integration: test-harness
 	IRONFLOCK_TEST_ENV_DIR="$harness/perapp_env" \
 	IRONFLOCK_TEST_REFERENCE="$tmp/py_reference.json" \
 	IRONFLOCK_TEST_PYTHON="$py" \
-	IRONFLOCK_TEST_RESTART_ROUTER=ironflock-router/restart.sh \
+	IRONFLOCK_TEST_RESTART_ROUTER=router/restart.sh \
 		go test -tags integration -race -count=1 -v ./integration/...
