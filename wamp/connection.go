@@ -21,6 +21,7 @@ import (
 
 	"github.com/ironflock/nexus/v3/client"
 	nxwamp "github.com/ironflock/nexus/v3/wamp"
+	"github.com/ironflock/sdk-go/internal/wampx"
 )
 
 // Reconnect and wait tunables. They mirror the Python and JavaScript SDKs.
@@ -223,6 +224,12 @@ type Connection struct {
 	state  stateLock
 	groups atomic.Pointer[[]*subGroup]
 	regs   []*Registration
+
+	// joins counts the sessions joined, and calls the ironflock package's
+	// hooks once a join has restored the subscriptions and registrations:
+	// table subscriptions catch up on the rows stored while the connection
+	// was down (see runSession).
+	joins wampx.Joins
 }
 
 // stateLock is a mutex whose waiters give up when their context ends: a
@@ -254,6 +261,23 @@ func (l *stateLock) unlock() { <-l.sem }
 // NewConnection returns an unconfigured Connection.
 func NewConnection() *Connection {
 	return &Connection{t: defaultTunables()}
+}
+
+// The ironflock package reaches a Connection's join counter and a
+// DeliveryGroup's queue through package wampx, which is internal.
+func init() {
+	wampx.Bind(wampx.Binding{
+		Joins: func(conn any) *wampx.Joins {
+			if c, ok := conn.(*Connection); ok && c != nil {
+				return &c.joins
+			}
+			return nil
+		},
+		RunInGroup: func(group any, fn func()) bool {
+			g, ok := group.(*DeliveryGroup)
+			return ok && g != nil && g.queue.submit(fn)
+		},
+	})
 }
 
 // Configure sets the connection parameters. It resolves the realm, the
@@ -752,9 +776,19 @@ func (c *Connection) Publish(ctx context.Context, topic string, args []any, kwar
 // match policy is an error: nexus can hold only one subscription per topic
 // string. opts.Group applies to this handler, not to the WAMP subscription.
 //
-// When ctx ends while Subscribe waits for a session or for subscription
-// changes in progress, it returns ctx.Err() and has sent nothing.
+// Subscribe waits up to the default session timeout for a session, also for
+// the next one when the session is lost while the subscription is made;
+// SubscribeWithin takes the wait. When ctx ends while Subscribe waits for a
+// session or for subscription changes in progress, it returns ctx.Err() and
+// has sent nothing.
 func (c *Connection) Subscribe(ctx context.Context, topic string, handler EventHandler, opts *SubscribeOptions) (*Subscription, error) {
+	return c.SubscribeWithin(ctx, topic, handler, opts, 0)
+}
+
+// SubscribeWithin is Subscribe waiting up to waitWindow (0: the default
+// session timeout) for a session, as Publish does. It is not retried: a
+// refusal is returned as it comes.
+func (c *Connection) SubscribeWithin(ctx context.Context, topic string, handler EventHandler, opts *SubscribeOptions, waitWindow time.Duration) (*Subscription, error) {
 	if err := validateURI("topic", topic); err != nil {
 		return nil, err
 	}
@@ -772,7 +806,10 @@ func (c *Connection) Subscribe(ctx context.Context, topic string, handler EventH
 	}
 	options := subscribeOptions(opts, match)
 
-	wait := c.defaultWait()
+	wait := waitWindow
+	if wait <= 0 {
+		wait = c.defaultWait()
+	}
 	deadline := time.Now().Add(wait)
 	for {
 		s, err := c.waitSession(ctx, deadline, wait)
@@ -873,8 +910,15 @@ func (c *Connection) findGroup(topic string) *subGroup {
 // restored again. Once no handler of its topic remains, the WAMP
 // subscription is ended at the router, after any subscription change in
 // progress; when ctx ends first, Unsubscribe returns ctx.Err() and the
-// router is told in the background. Unsubscribing an already-removed
-// subscription is a no-op.
+// router is told in the background. Other handlers of the topic keep the
+// WAMP subscription and their events. Unsubscribing an already-removed
+// subscription is a no-op, and so is a nil one.
+//
+// Unsubscribe does not wait for a session: while the connection is down it
+// removes the subscription locally and returns — the router dropped the
+// session's subscriptions with the session, and the subscription is not
+// restored after the reconnect. While connected it returns once the router
+// has answered; a refusal is returned, and the local removal stands.
 func (c *Connection) Unsubscribe(ctx context.Context, sub *Subscription) error {
 	if sub == nil || sub.conn != c || sub.group == nil || !sub.detach() {
 		return nil
@@ -969,9 +1013,19 @@ func (c *Connection) dropSubscription(g *subGroup) error {
 // never reaches the caller, who gets no answer; a string that is not valid
 // UTF-8 makes an autobahn-python caller (the Python SDK) drop its session.
 //
-// When ctx ends while Register waits for a session or for subscription
-// changes in progress, it returns ctx.Err() and has sent nothing.
+// Register waits up to the default session timeout for a session, also for
+// the next one when the session is lost while the registration is made;
+// RegisterWithin takes the wait. When ctx ends while Register waits for a
+// session or for subscription changes in progress, it returns ctx.Err() and
+// has sent nothing.
 func (c *Connection) Register(ctx context.Context, procedure string, handler InvocationHandler, opts *RegisterOptions) (*Registration, error) {
+	return c.RegisterWithin(ctx, procedure, handler, opts, 0)
+}
+
+// RegisterWithin is Register waiting up to waitWindow (0: the default
+// session timeout) for a session, as Publish does. It is not retried: a
+// refusal is returned as it comes.
+func (c *Connection) RegisterWithin(ctx context.Context, procedure string, handler InvocationHandler, opts *RegisterOptions, waitWindow time.Duration) (*Registration, error) {
 	if err := validateURI("procedure", procedure); err != nil {
 		return nil, err
 	}
@@ -989,7 +1043,10 @@ func (c *Connection) Register(ctx context.Context, procedure string, handler Inv
 	}
 	reg := &Registration{conn: c, procedure: procedure, handler: handler, options: registerOptions(opts, policy)}
 
-	wait := c.defaultWait()
+	wait := waitWindow
+	if wait <= 0 {
+		wait = c.defaultWait()
+	}
 	deadline := time.Now().Add(wait)
 	for {
 		s, err := c.waitSession(ctx, deadline, wait)
@@ -1053,7 +1110,14 @@ func (c *Connection) registerOn(ctx context.Context, s *session, reg *Registrati
 // a retry window retries both (see IsNotServedYet); the Python and
 // JavaScript SDKs retry only no_such_procedure. The router is told after any
 // subscription change in progress; when ctx ends first, Unregister returns
-// ctx.Err() and the router is told in the background.
+// ctx.Err() and the router is told in the background. A refusal is returned,
+// and the local removal stands. Unregistering an already-removed
+// registration is a no-op, and so is a nil one.
+//
+// Unregister does not wait for a session: while the connection is down it
+// removes the registration locally and returns — the router dropped the
+// session's registrations with the session, and the registration is not
+// restored after the reconnect.
 func (c *Connection) Unregister(ctx context.Context, reg *Registration) error {
 	if reg == nil || reg.conn != c || !reg.removed.CompareAndSwap(false, true) {
 		return nil
@@ -1144,8 +1208,8 @@ func (s *Subscription) Topic() string { return s.topic }
 func (s *Subscription) Match() string { return s.match }
 
 // Active reports whether the subscription is currently live at the router —
-// false while the connection is down, and after a failed restore until a
-// retry succeeds.
+// false while the connection is down, after a failed restore until a retry
+// succeeds, and after Unsubscribe.
 func (s *Subscription) Active() bool {
 	if s == nil || s.removed.Load() || s.group == nil {
 		return false
@@ -1179,8 +1243,8 @@ func (r *Registration) Procedure() string { return r.procedure }
 
 // Active reports whether the registration is currently live at the router —
 // false while the connection is down, after a failed restore until a retry
-// succeeds, and once another session has taken the procedure over (until
-// the next reconnect registers it again).
+// succeeds, once another session has taken the procedure over (until the
+// next reconnect registers it again), and after Unregister.
 func (r *Registration) Active() bool {
 	if r == nil || r.removed.Load() {
 		return false

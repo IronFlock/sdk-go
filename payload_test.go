@@ -244,7 +244,7 @@ func TestNormalizeNonFiniteFloatsEverywhere(t *testing.T) {
 }
 
 // Finding 11 through the public API: a struct batch with a NaN reading is
-// published whole, as the equivalent []Row batch is.
+// sent whole, as the equivalent []Row batch is.
 func TestBulkWritesSendNonFiniteReadings(t *testing.T) {
 	type reading struct {
 		Temperature float64 `json:"temperature"`
@@ -256,17 +256,17 @@ func TestBulkWritesSendNonFiniteReadings(t *testing.T) {
 	if err := f.PublishToTable(bg, "sensordata", reading{Temperature: math.Inf(1)}); err != nil {
 		t.Fatal(err)
 	}
-	pubs := f.own.allPublishes()
-	if len(pubs) != 2 {
-		t.Fatalf("%d publications, want 2", len(pubs))
+	calls := f.own.allCalls()
+	if len(calls) != 2 {
+		t.Fatalf("%d calls, want 2", len(calls))
 	}
-	batch := pubs[0].Args[0].([]any)
+	batch := calls[0].Args[0].([]any)
 	if len(batch) != 2 || !sameFloat(batch[0].(map[string]any)["temperature"], 1) ||
 		!sameFloat(batch[1].(map[string]any)["temperature"], math.NaN()) {
 		t.Errorf("batch %#v", batch)
 	}
-	if !sameFloat(pubs[1].Args[0].(map[string]any)["temperature"], math.Inf(1)) {
-		t.Errorf("row %#v", pubs[1].Args)
+	if !sameFloat(calls[1].Args[0].(map[string]any)["temperature"], math.Inf(1)) {
+		t.Errorf("row %#v", calls[1].Args)
 	}
 }
 
@@ -1016,10 +1016,10 @@ func TestBulkRowsEncodeLikeSingleRows(t *testing.T) {
 		if err := f.PublishToTable(bg, "sensordata", r); err != nil {
 			t.Fatal(err)
 		}
-		one := f.own.lastPublish(t).Args[0]
+		one := f.own.lastCall(t).Args[0]
 		if err := f.PublishRowsToTable(bg, "sensordata", sliceOf(r)); err != nil {
 			t.Errorf("PublishRowsToTable([]%T): %v", r, err)
-		} else if bulk := f.own.lastPublish(t).Args[0].([]any)[0]; !reflect.DeepEqual(bulk, one) {
+		} else if bulk := f.own.lastCall(t).Args[0].([]any)[0]; !reflect.DeepEqual(bulk, one) {
 			t.Errorf("PublishRowsToTable([]%T) sends %#v; PublishToTable %#v", r, bulk, one)
 		}
 		if _, err := f.AppendToTable(bg, "sensordata", r); err != nil {

@@ -25,7 +25,7 @@ func main() {
 	err = ifl.Run(context.Background(), func(ctx context.Context) error {
 		// Registered as <SWARM_KEY>.<DEVICE_KEY>.<APP_KEY>.<STAGE>.add and
 		// restored after every reconnect.
-		_, err := ifl.RegisterDeviceFunction(ctx, "add", func(ctx context.Context, inv *ironflock.Invocation) (any, error) {
+		reg, err := ifl.RegisterDeviceFunction(ctx, "add", func(ctx context.Context, inv *ironflock.Invocation) (any, error) {
 			if len(inv.Args) != 2 {
 				return nil, &ironflock.WampError{URI: "com.example.error.bad_arguments", Args: []any{"add takes two numbers"}}
 			}
@@ -39,6 +39,9 @@ func main() {
 		if err != nil {
 			return err
 		}
+		// The handle names the full URI; reg.Unregister(ctx), or
+		// ifl.Unregister(ctx, reg), would remove the function at once.
+		log.Printf("registered %s (live: %v)", reg.Procedure(), reg.Active())
 		if *peer == 0 {
 			<-ctx.Done()
 			return nil

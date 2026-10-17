@@ -644,6 +644,68 @@ func TestOperationsWaitForReconnect(t *testing.T) {
 	if !errors.Is(err, ErrNotConnected) || !strings.Contains(err.Error(), "no session after 0.03s") {
 		t.Fatalf("Publish while down = %v", err)
 	}
+	// So it does for a call without a retry window.
+	_, err = c.Call(context.Background(), "wait.proc", nil, nil, nil, 0)
+	if !errors.Is(err, ErrNotConnected) || !strings.Contains(err.Error(), "no session after 0.03s") {
+		t.Fatalf("Call while down = %v", err)
+	}
+	// And for Subscribe and Register.
+	if _, err := c.Subscribe(context.Background(), "wait.topic", func(*Event) {}, nil); !errors.Is(err, ErrNotConnected) ||
+		!strings.Contains(err.Error(), "no session after 0.03s") {
+		t.Fatalf("Subscribe while down = %v", err)
+	}
+	if _, err := c.Register(context.Background(), "wait.proc", echoHandler("ok:"), nil); !errors.Is(err, ErrNotConnected) ||
+		!strings.Contains(err.Error(), "no session after 0.03s") {
+		t.Fatalf("Register while down = %v", err)
+	}
+	tr.addRealm()
+}
+
+// SubscribeWithin and RegisterWithin wait for a session for their whole
+// window, beyond the default session wait, and then subscribe and register
+// once; without a window they wait the default.
+func TestSubscribeAndRegisterWithinWaitForTheirWindow(t *testing.T) {
+	tr := newTestRouter(t, true)
+	c, _ := startTestConn(t, tr, func(cfg *Config, _ *Connection) { cfg.SessionWaitTimeout = 30 * time.Millisecond })
+	tr.removeRealm()
+	eventually(t, 2*time.Second, "session down", func() bool { return !c.IsOpen() })
+
+	handler, events := eventCollector(4)
+	subscribed := make(chan error, 1)
+	go func() {
+		_, err := c.SubscribeWithin(context.Background(), "within.topic", handler, nil, 5*time.Second)
+		subscribed <- err
+	}()
+	registered := make(chan error, 1)
+	go func() {
+		_, err := c.RegisterWithin(context.Background(), "within.proc", echoHandler("ok:"), nil, 5*time.Second)
+		registered <- err
+	}()
+	time.Sleep(200 * time.Millisecond) // well beyond the default wait
+	tr.addRealm()
+	if err := recv(t, subscribed, "SubscribeWithin"); err != nil {
+		t.Fatalf("SubscribeWithin across the outage: %v", err)
+	}
+	if err := recv(t, registered, "RegisterWithin"); err != nil {
+		t.Fatalf("RegisterWithin across the outage: %v", err)
+	}
+	pub := tr.local(t)
+	localPublish(t, pub, "within.topic", nxwamp.List{1}, nil)
+	recv(t, events, "the event")
+	if _, err := localCall(t, pub, "within.proc"); err != nil {
+		t.Errorf("the procedure registered across the outage: %v", err)
+	}
+
+	tr.removeRealm()
+	eventually(t, 2*time.Second, "session down", func() bool { return !c.IsOpen() })
+	if _, err := c.SubscribeWithin(context.Background(), "other.topic", handler, nil, 0); !errors.Is(err, ErrNotConnected) ||
+		!strings.Contains(err.Error(), "no session after 0.03s") {
+		t.Errorf("SubscribeWithin without a window = %v", err)
+	}
+	if _, err := c.RegisterWithin(context.Background(), "other.proc", echoHandler("ok:"), nil, 0); !errors.Is(err, ErrNotConnected) ||
+		!strings.Contains(err.Error(), "no session after 0.03s") {
+		t.Errorf("RegisterWithin without a window = %v", err)
+	}
 	tr.addRealm()
 }
 
@@ -1216,4 +1278,138 @@ func tail(s string, n int) string {
 		return s[len(s)-n:]
 	}
 	return s
+}
+
+// While the connection is down, Unsubscribe and Unregister do not wait for a
+// session: they remove the handle locally and return at once. What they
+// removed is not restored after the reconnect; another handler of the same
+// topic is, and keeps its events.
+func TestRemovalWhileDisconnectedDoesNotWaitForASession(t *testing.T) {
+	tr := newTestRouter(t, true)
+	c, _ := startTestConn(t, tr, func(cfg *Config, _ *Connection) { cfg.SessionWaitTimeout = time.Minute })
+	ctx := ctxTimeout(t, 10*time.Second)
+	h1, ev1 := eventCollector(8)
+	h2, ev2 := eventCollector(8)
+	h3, ev3 := eventCollector(8)
+	gone, err := c.Subscribe(ctx, "shared.topic", h1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept, err := c.Subscribe(ctx, "shared.topic", h2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	solo, err := c.Subscribe(ctx, "solo.topic", h3, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg, err := c.Register(ctx, "removed.proc", echoHandler("ok:"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr.removeRealm() // the session ends, and every reconnect is refused until the realm is back
+	eventually(t, 2*time.Second, "session down", func() bool { return !c.IsOpen() })
+	for _, removal := range []struct {
+		name   string
+		remove func(context.Context) error
+	}{
+		{"Unsubscribe of one handler of a topic", func(ctx context.Context) error { return c.Unsubscribe(ctx, gone) }},
+		{"Subscription.Unsubscribe of a topic's only handler", solo.Unsubscribe},
+		{"Unregister", func(ctx context.Context) error { return c.Unregister(ctx, reg) }},
+	} {
+		began := time.Now()
+		if err := removal.remove(ctxTimeout(t, 3*time.Second)); err != nil {
+			t.Errorf("%s while disconnected = %v", removal.name, err)
+		}
+		if el := time.Since(began); el > 500*time.Millisecond {
+			t.Errorf("%s took %v while disconnected: it waited for a session", removal.name, el)
+		}
+	}
+	if c.IsOpen() {
+		t.Fatal("reconnected during the removals: they were not made while disconnected")
+	}
+	if gone.Active() || solo.Active() || reg.Active() {
+		t.Fatal("a removed handle is active")
+	}
+	if groups, regs := trackedCounts(t, c); groups != 1 || regs != 0 {
+		t.Fatalf("tracked %d topics and %d procedures, want only shared.topic", groups, regs)
+	}
+
+	tr.addRealm()
+	eventually(t, 5*time.Second, "the reconnect to restore the kept handler", kept.Active)
+	if gone.Active() || solo.Active() || reg.Active() {
+		t.Fatal("a handle removed while disconnected was restored after the reconnect")
+	}
+	if tr.lookup(t, nxwamp.MetaProcSubLookup, "solo.topic") != 0 || tr.lookup(t, nxwamp.MetaProcRegLookup, "removed.proc") != 0 {
+		t.Fatal("the router has a subscription or registration removed while disconnected")
+	}
+	pub := tr.local(t)
+	localPublish(t, pub, "shared.topic", nxwamp.List{1}, nil)
+	localPublish(t, pub, "solo.topic", nxwamp.List{2}, nil)
+	if got := recv(t, ev2, "the kept handler's event").Args[0]; got != int64(1) {
+		t.Fatalf("got %v", got)
+	}
+	noRecv(t, ev1, "an event for the handler removed while disconnected")
+	noRecv(t, ev3, "an event of the topic removed while disconnected")
+	if _, err := localCall(t, pub, "removed.proc"); err == nil {
+		t.Error("the procedure removed while disconnected answered")
+	}
+}
+
+// A removal the router refuses is returned as the router's error, and the
+// local removal stands: the handler is called no more, and the subscription
+// or registration is not restored after a reconnect.
+func TestARefusedRemovalStandsLocally(t *testing.T) {
+	tr := newTestRouter(t, true)
+	connects := make(chan struct{}, 8)
+	c, _ := startTestConn(t, tr, func(cfg *Config, _ *Connection) { cfg.OnConnect = func() { connects <- struct{}{} } })
+	recv(t, connects, "OnConnect")
+	ctx := ctxTimeout(t, 10*time.Second)
+	handler, events := eventCollector(8)
+	sub, err := c.Subscribe(ctx, "refused.topic", handler, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invoked := make(chan struct{}, 4)
+	reg, err := c.Register(ctx, "refused.proc", func(context.Context, *Invocation) (any, error) {
+		invoked <- struct{}{}
+		return "served", nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr.authz.setDeny("UNSUBSCRIBE", true)
+	tr.authz.setDeny("UNREGISTER", true)
+	var werr *Error
+	if err := c.Unsubscribe(ctx, sub); !errors.As(err, &werr) || werr.URI != URINotAuthorized {
+		t.Fatalf("refused Unsubscribe = %v, want the router's %s", err, URINotAuthorized)
+	}
+	if err := c.Unregister(ctx, reg); !errors.As(err, &werr) || werr.URI != URINotAuthorized {
+		t.Fatalf("refused Unregister = %v, want the router's %s", err, URINotAuthorized)
+	}
+	if sub.Active() || reg.Active() {
+		t.Fatal("active after a refused removal")
+	}
+	if groups, regs := trackedCounts(t, c); groups != 0 || regs != 0 {
+		t.Fatalf("still tracked after a refused removal: %d topics, %d procedures", groups, regs)
+	}
+	// The router keeps them, but nothing reaches the handlers.
+	pub := tr.local(t)
+	localPublish(t, pub, "refused.topic", nxwamp.List{1}, nil)
+	noRecv(t, events, "an event after the refused Unsubscribe")
+	if _, err := localCall(t, pub, "refused.proc"); err == nil {
+		t.Error("the procedure answered after the refused Unregister")
+	}
+	noRecv(t, invoked, "a call of the handler after the refused Unregister")
+
+	// Nor are they restored after a reconnect.
+	tr.ln.dropAll()
+	recv(t, connects, "OnConnect after the reconnect")
+	if tr.lookup(t, nxwamp.MetaProcSubLookup, "refused.topic") != 0 || tr.lookup(t, nxwamp.MetaProcRegLookup, "refused.proc") != 0 {
+		t.Fatal("restored after the reconnect")
+	}
+	localPublish(t, pub, "refused.topic", nxwamp.List{2}, nil)
+	noRecv(t, events, "an event after the reconnect")
 }

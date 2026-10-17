@@ -340,7 +340,13 @@ func (c *Connection) dialAndJoin(ctx context.Context) (*session, string, error) 
 // runSession restores the tracked subscriptions and registrations on a
 // freshly joined session, announces it, and blocks until it ends or ctx is
 // done. It returns the close reason ("" when ctx is done).
+//
+// The join is counted before the restore, so that the events of s, which
+// arrive once its subscriptions are restored, are handled under its count;
+// the join hooks (see wampx.Joins) are called once the restore is done,
+// while s is still up.
 func (c *Connection) runSession(ctx context.Context, s *session) string {
+	join := c.joins.Begin()
 	failed, ok := c.establish(ctx, s)
 	if !ok {
 		c.markDown(s)
@@ -358,6 +364,11 @@ func (c *Connection) runSession(ctx context.Context, s *session) string {
 	}
 	if !failed.empty() {
 		go c.retryRestore(ctx, s, failed)
+	}
+	// s is the current session (only this goroutine withdraws it); it may
+	// have ended already, and then the next join's hooks take over.
+	if s.alive() {
+		c.joins.Restored(join, c.log)
 	}
 
 	if !c.awaitEnd(ctx, s) {

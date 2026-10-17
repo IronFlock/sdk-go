@@ -249,8 +249,12 @@ func (f *IronFlock) GetSeriesHistory(ctx context.Context, table string, q Series
 // The data backend answers at most 30 calls a minute per app credential on
 // a device; beyond that the call fails with URIRateLimited. Reveal a secret
 // once and keep it rather than on every use. A filter on a secret column is
-// refused with URISecretColumn, a table without secret columns with
-// URINotASecretColumn.
+// refused with URISecretColumn. The data backend serves secret.reveal only
+// for tables that declare a secret column: on any other table the call
+// fails as not registered (wamp.error.no_such_procedure), once the reconnect
+// window has passed, with an error that names the causes, most likely
+// first: the table declares no secret column, the table is not declared,
+// or the data backend predates secret columns.
 func (f *IronFlock) RevealSecrets(ctx context.Context, table string, q *TableQueryParams) ([]Row, error) {
 	if err := validateReadTable(table); err != nil {
 		return nil, err
@@ -282,7 +286,10 @@ func (f *IronFlock) RevealSecrets(ctx context.Context, table string, q *TableQue
 // a device; beyond that the call fails with URIRateLimited — for a check on
 // every request (an API key, say), cache a positive outcome briefly. A
 // column that is not a secret column is refused with URINotASecretColumn,
-// a filter on a secret column with URISecretColumn.
+// a filter on a secret column with URISecretColumn. On a table without a
+// secret column there is no secret.verify procedure: the call fails as not
+// registered, once the reconnect window has passed, with the causes named
+// as for RevealSecrets.
 func (f *IronFlock) VerifySecret(ctx context.Context, table, column, candidate string, q *TableQueryParams) (*SecretVerifyResult, error) {
 	if err := validateReadTable(table); err != nil {
 		return nil, err

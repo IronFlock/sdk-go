@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -64,61 +63,50 @@ func mergeKwargs(kwargs []Kwargs) (map[string]any, error) {
 // (DEVICE_SERIAL_NUMBER, DEVICE_KEY, DEVICE_NAME) is added to the kwargs,
 // user keys winning. The publish is acknowledged: a refusal by the router is
 // returned as an error.
+//
+// Publish waits up to the reconnect window (see WithReconnectWindow) for a
+// connection — issued before Start, for Start as well — so it rides out a
+// short outage, and is then sent once, never retried; without a window it
+// waits 10s.
 func (f *IronFlock) Publish(ctx context.Context, topic string, args ...any) error {
 	if err := validateTopic("publish", topic); err != nil {
 		return err
 	}
-	return f.publish(ctx, "publish", topic, args, 0)
-}
-
-// publish sends an acknowledged publication with the device metadata merged
-// into its kwargs, waiting up to window for a session. group names the
-// parameters in validation errors.
-func (f *IronFlock) publish(ctx context.Context, group, topic string, args []any, window time.Duration) error {
 	pos, kw, callOpts, err := splitArgs(args)
 	if err != nil {
-		return invalidParams(group, err)
+		return invalidParams("publish", err)
 	}
 	if callOpts != nil {
-		return invalidf("Invalid %s parameters: CallOptions apply to calls, not to publications", group)
+		return invalidf("Invalid publish parameters: CallOptions apply to calls, not to publications")
 	}
-	return f.publishMessage(ctx, topic, pos, kw, window)
-}
-
-// publishMessage sends an acknowledged publication with the device metadata
-// merged into its kwargs, waiting up to window for a session (and, issued
-// before Start, for Start).
-func (f *IronFlock) publishMessage(ctx context.Context, topic string, args []any, kwargs map[string]any, window time.Duration) error {
-	window, err := f.gate(ctx, window)
+	window, err := f.gate(ctx, f.reconnectWindow)
 	if err == nil {
-		err = f.conn.Publish(ctx, topic, args, f.withDeviceMetadata(kwargs),
+		err = f.conn.Publish(ctx, topic, pos, f.withDeviceMetadata(kw),
 			&wamp.PublishOptions{Acknowledge: true}, window)
 	}
 	return operationFailed(fmt.Sprintf("Publish to topic '%s'", topic), err)
 }
 
-// PublishToTable publishes a row to a fleet table: the table's write topic
-// <SWARM_KEY>.<APP_KEY>.<table>. Fire-and-forget: the acknowledgement
-// confirms delivery to the router, not the database insert.
+// PublishToTable writes a row to a fleet table. It is AppendToTable without
+// the outcome: it calls the table's append procedure
+// append.<SWARM_KEY>.<APP_KEY>.<table>, with the same arguments, so it rides
+// out a platform restart (it waits up to the reconnect window for the
+// connection and retries while the data backend does not serve the table
+// yet) and returns the data backend's refusals — a row without tsp, say —
+// instead of losing the row. Its errors begin "Publish to table".
 //
 //	ifl.PublishToTable(ctx, "sensordata", ironflock.Row{"tsp": time.Now(), "temperature": 22.5})
 //
 // The data backend reads the row from the first positional argument (unless
 // the table's data template maps its columns elsewhere), and every table
-// has a mandatory tsp column: a row without tsp is dropped, with nothing but
-// an entry in the app's error-logs table to show for it. A row the data
-// backend refuses for lack of storage is dropped without even that (the
-// error-logs table notes only when the appliance's disk runs full).
-// AppendToTable reports such refusals.
+// has a mandatory tsp column.
+//
+// ironflock-go 1.9.1 and earlier published the row to the topic
+// <SWARM_KEY>.<APP_KEY>.<table>: a row published while the data backend
+// restarted was lost, and a refused one dropped without a word.
 func (f *IronFlock) PublishToTable(ctx context.Context, table string, args ...any) error {
-	t, err := validateTableName(table)
-	if err != nil {
-		return invalidParams("table", err)
-	}
-	if err := f.requireKeys(); err != nil {
-		return err
-	}
-	return f.publish(ctx, "table", fmt.Sprintf("%d.%d.%s", f.swarmKey, f.appKey, t), args, f.reconnectWindow)
+	_, err := f.appendRow(ctx, "Publish to", table, args)
+	return err
 }
 
 // AppendToTable appends a row to a fleet table by calling its append
@@ -131,6 +119,12 @@ func (f *IronFlock) PublishToTable(ctx context.Context, table string, args ...an
 // row later), URIStorageOverusage, URIEntityKeyConflict, and for secret
 // columns URISecretSentinelUnresolvable and URISecretCiphertextRejected.
 func (f *IronFlock) AppendToTable(ctx context.Context, table string, args ...any) (*Result, error) {
+	return f.appendRow(ctx, "Append to", table, args)
+}
+
+// appendRow is AppendToTable and PublishToTable: verb begins the error
+// message ("Append to", "Publish to").
+func (f *IronFlock) appendRow(ctx context.Context, verb, table string, args []any) (*Result, error) {
 	t, err := validateTableName(table)
 	if err != nil {
 		return nil, invalidParams("table", err)
@@ -145,7 +139,7 @@ func (f *IronFlock) AppendToTable(ctx context.Context, table string, args ...any
 	topic := fmt.Sprintf("append.%d.%d.%s", f.swarmKey, f.appKey, t)
 	res, err := f.call(ctx, topic, pos, f.withDeviceMetadata(kw), callOpts, f.reconnectWindow)
 	if err != nil {
-		return nil, appendFailed(fmt.Sprintf("Append to table '%s'", t), err,
+		return nil, appendFailed(fmt.Sprintf("%s table '%s'", verb, t), err,
 			"the data backend refused the row without a reason — a missing tsp is the usual cause; see the error-logs table")
 	}
 	return res, nil
@@ -194,28 +188,25 @@ func bulkParams(table string, rows any, kwargs []Kwargs) (string, []any, map[str
 	return t, batch, kw, nil
 }
 
-// PublishRowsToTable publishes many rows in a single message (bulk insert)
-// to bulk.<SWARM_KEY>.<APP_KEY>.<table>; the platform inserts the batch
-// atomically. rows is a non-empty slice of rows (Row / map[string]any, or
-// structs encoded via their json tags). kwargs are shared by the batch.
-// Every row needs its own tsp (see PublishToTable): a batch the data backend
-// refuses is dropped without a word to the publisher.
+// PublishRowsToTable writes many rows in a single message (bulk insert); the
+// platform inserts the batch atomically. rows is a non-empty slice of rows
+// (Row / map[string]any, or structs encoded via their json tags). kwargs are
+// shared by the batch. Every row needs its own tsp (see PublishToTable).
+//
+// It is AppendRowsToTable without the outcome: it calls the bulk procedure
+// appendBulk.<SWARM_KEY>.<APP_KEY>.<table>, rides out a platform restart as
+// that does, and returns the data backend's refusals. Its errors begin
+// "Bulk publish of <n> row(s) to table". ironflock-go 1.9.1 and earlier
+// published the batch to the topic bulk.<SWARM_KEY>.<APP_KEY>.<table>: a
+// batch published while the data backend restarted was lost, and a refused
+// one dropped without a word.
 //
 // Each row is encoded exactly as PublishToTable encodes it: taken as a value,
 // so marshal methods (MarshalJSON, MarshalText, ...) with pointer receivers
 // are not used; pass a []*T to use them.
 func (f *IronFlock) PublishRowsToTable(ctx context.Context, table string, rows any, kwargs ...Kwargs) error {
-	t, batch, kw, err := bulkParams(table, rows, kwargs)
-	if err != nil {
-		return err
-	}
-	if err := f.requireKeys(); err != nil {
-		return err
-	}
-	// The whole batch is the single positional argument: the data backend
-	// reads args[0] as the array of rows.
-	topic := fmt.Sprintf("bulk.%d.%d.%s", f.swarmKey, f.appKey, t)
-	return f.publishMessage(ctx, topic, []any{batch}, kw, f.reconnectWindow)
+	_, err := f.appendRows(ctx, "Bulk publish", table, rows, kwargs)
+	return err
 }
 
 // AppendRowsToTable appends many rows in a single call (bulk insert) to
@@ -224,6 +215,12 @@ func (f *IronFlock) PublishRowsToTable(ctx context.Context, table string, rows a
 // nothing is persisted. Every row needs its own tsp; the refusals are those
 // of AppendToTable. Rows are encoded as PublishRowsToTable encodes them.
 func (f *IronFlock) AppendRowsToTable(ctx context.Context, table string, rows any, kwargs ...Kwargs) (*Result, error) {
+	return f.appendRows(ctx, "Bulk append", table, rows, kwargs)
+}
+
+// appendRows is AppendRowsToTable and PublishRowsToTable: verb begins the
+// error message ("Bulk append", "Bulk publish").
+func (f *IronFlock) appendRows(ctx context.Context, verb, table string, rows any, kwargs []Kwargs) (*Result, error) {
 	t, batch, kw, err := bulkParams(table, rows, kwargs)
 	if err != nil {
 		return nil, err
@@ -231,10 +228,12 @@ func (f *IronFlock) AppendRowsToTable(ctx context.Context, table string, rows an
 	if err := f.requireKeys(); err != nil {
 		return nil, err
 	}
+	// The whole batch is the single positional argument: the data backend
+	// reads args[0] as the array of rows.
 	topic := fmt.Sprintf("appendBulk.%d.%d.%s", f.swarmKey, f.appKey, t)
 	res, err := f.call(ctx, topic, []any{batch}, f.withDeviceMetadata(kw), nil, f.reconnectWindow)
 	if err != nil {
-		return nil, appendFailed(fmt.Sprintf("Bulk append of %d row(s) to table '%s'", len(batch), t), err,
+		return nil, appendFailed(fmt.Sprintf("%s of %d row(s) to table '%s'", verb, len(batch), t), err,
 			"the data backend refused the rows without a reason — a row without tsp is the usual cause; see the error-logs table")
 	}
 	return res, nil
@@ -243,20 +242,27 @@ func (f *IronFlock) AppendRowsToTable(ctx context.Context, table string, rows an
 // ErrorLevel is the severity of a reported error.
 type ErrorLevel string
 
-// Error levels.
+// Error levels: the types the board's toast widget shows.
 const (
-	LevelError ErrorLevel = "error"
-	LevelWarn  ErrorLevel = "warn"
-	LevelInfo  ErrorLevel = "info"
-	LevelDebug ErrorLevel = "debug"
+	LevelError   ErrorLevel = "error"
+	LevelWarning ErrorLevel = "warning"
+	LevelInfo    ErrorLevel = "info"
+	LevelDebug   ErrorLevel = "debug"
+
+	// Deprecated: LevelWarn is the old name of LevelWarning. It, and the raw
+	// level "warn" that ironflock-go 1.9.1 and earlier sent, go out as
+	// "warning".
+	LevelWarn = LevelWarning
 )
 
 // ReportErrorOptions configures ReportError.
 type ReportErrorOptions struct {
 	// Level defaults to LevelError.
 	Level ErrorLevel
-	// Append uses the append procedure and returns the insert outcome
-	// instead of a fire-and-forget publish.
+	// Append is kept for compatibility: the row is appended either way, as
+	// PublishToTable and AppendToTable both append. It only picks which of
+	// the two the error message names ("Append to table" with it,
+	// "Publish to table" without).
 	Append bool
 	// Tsp overrides the timestamp (default: now, RFC 3339 UTC).
 	Tsp string
@@ -272,8 +278,11 @@ const errorTimestampLayout = "2006-01-02T15:04:05.000Z07:00"
 // error-logs table, stamped source "app" — queryable with GetHistory and
 // streamed on transformed.error-logs, without firing the platform's
 // system-error toast. errOrMsg is an error (recorded with fmt's %+v, so
-// errors that carry a stack trace include it) or a message string. The
-// Result is nil unless opts.Append is set.
+// errors that carry a stack trace include it) or a message string. It
+// appends the row as AppendToTable does — riding out a platform restart for
+// up to the reconnect window — and returns the insert outcome, with or
+// without opts.Append (ironflock-go 1.9.1 and earlier published the row
+// without Append, and returned a nil Result).
 //
 // The row is {"tsp", "msg", "user_message", "source": "app", "level"}. Only
 // the first opts value is used.
@@ -299,13 +308,17 @@ func (f *IronFlock) ReportError(ctx context.Context, errOrMsg any, opts ...Repor
 	if o.UserMessage == "" {
 		row["user_message"] = msg
 	}
-	if o.Level == "" {
+	switch o.Level {
+	case "":
 		row["level"] = string(LevelError)
+	case "warn":
+		row["level"] = string(LevelWarning)
 	}
+	verb := "Publish to"
 	if o.Append {
-		return f.AppendToTable(ctx, ErrorLogsTable, row)
+		verb = "Append to"
 	}
-	return nil, f.PublishToTable(ctx, ErrorLogsTable, row)
+	return f.appendRow(ctx, verb, ErrorLogsTable, []any{row})
 }
 
 // errorText is the msg column of a reported error.
@@ -322,27 +335,64 @@ func errorText(v any) string {
 	}
 }
 
-// TableSubscription is the pair of subscriptions behind SubscribeToTable:
-// the table's realtime feed and its bulk counterpart.
+// TableSubscription is the handle SubscribeToTable returns, for a table of
+// the app's own and of a consumed app: the pair of subscriptions behind it,
+// the table's realtime feed and its bulk counterpart, which deliver to one
+// handler. Unsubscribe removes both (as IronFlock.Unsubscribe does when
+// given the handle), Table names the table, and Active reports whether both
+// feeds are live.
 type TableSubscription struct {
+	// Rows and Bulk are the subscriptions of transformed.<table> and
+	// transformed.bulk.<table>. Remove them only through Unsubscribe, which
+	// also ends the catch-up after a reconnect.
 	Rows *Subscription
 	Bulk *Subscription
-	conn wampConn
-	// closed is set by Unsubscribe: no handler call starts after it.
-	closed atomic.Bool
+
+	table string
+	conn  wampConn
+	// follower delivers to the handler; Unsubscribe stops it, and no
+	// handler call starts after that.
+	follower *tableFollower
+}
+
+// Table returns the name of the subscribed table or transform ("" for a nil
+// handle).
+func (t *TableSubscription) Table() string {
+	if t == nil {
+		return ""
+	}
+	return t.table
+}
+
+// Active reports whether both feeds are live at the router (see
+// Subscription.Active): false while the connection is down, after a failed
+// restore of either feed until a retry succeeds, and after Unsubscribe.
+func (t *TableSubscription) Active() bool {
+	return t != nil && t.Rows.Active() && t.Bulk.Active()
 }
 
 // Unsubscribe removes both subscriptions. It takes effect at once: the
 // handler is called for no further event — neither one still queued for
-// either feed nor a remaining row of a bulk event being delivered — though a
-// call already under way is not waited for (the handler may call
-// Unsubscribe itself). The subscriptions are then removed as
-// wamp.Connection.Unsubscribe removes them, within ctx.
+// either feed, nor a remaining row of a bulk event being delivered, nor a
+// row stored while the connection was down — though a call already under way
+// is not waited for (the handler may call Unsubscribe itself). The
+// subscriptions are then removed as wamp.Connection.Unsubscribe removes
+// them, within ctx, and are never restored after a reconnect.
+//
+// Unsubscribe does not wait for a connection: while it is down, the
+// subscriptions are removed locally and Unsubscribe returns. While
+// connected, it returns once the router has answered; a refusal is returned
+// as an *OperationError, and the local removal stands. A second call is a
+// no-op, as is a call after Stop or Close, and so is a nil handle. Other
+// handles on the same table — another SubscribeToTable, or a Subscribe of
+// one of its feeds — keep their subscriptions.
 func (t *TableSubscription) Unsubscribe(ctx context.Context) error {
 	if t == nil || t.conn == nil {
 		return nil
 	}
-	t.closed.Store(true)
+	if t.follower != nil {
+		t.follower.stop()
+	}
 	var errs []error
 	for _, sub := range []*Subscription{t.Rows, t.Bulk} {
 		if sub == nil {
@@ -361,15 +411,37 @@ func (t *TableSubscription) Unsubscribe(ctx context.Context) error {
 // the data-template columns, secret columns masked — in Args[0] (see
 // Event.Row); rows of a bulk insert are delivered one event per row.
 //
+// Rows stored while the connection was down arrive after the reconnect. The
+// router does not replay what was published meanwhile, so after every
+// reconnect the handler first gets the rows stored meanwhile, oldest first,
+// and then the rows that arrived live since: every row whose tsp is later
+// than the newest row the handler got (before the first one, than the newest
+// row stored when it subscribed). A row written meanwhile with an older tsp
+// is not caught up on. A SubscribeToTable issued while there is no session —
+// before the first join, or in a reconnect gap — waits for the session (up
+// to the reconnect window, see WithReconnectWindow; 10s without one) and
+// subscribes then, not retried: the rows stored before are not caught up on.
+// One catch-up delivers at most the newest 10000 rows, and logs a warning
+// when it read that many. Its read waits for the data backend like any
+// history read, up to the reconnect window; when it fails, those rows are not
+// delivered and a warning is logged. A caught-up row's
+// event has the topic transformed.<table> and no kwargs or details.
+//
 // A transform (a data template's SQL view) has no rows of its own: on every
 // tick of its schedule the data backend publishes the whole view — at most
 // 3000 rows, in the view's order reversed — as one event whose Args[0] is
 // the list of rows. Read it with Event.Rows; Event.Row returns nil for it.
+// Its next tick after a reconnect delivers the whole view again.
 //
 // handler is called one event at a time, in the order the events arrive on
 // both feeds, as one subscription calls its handler (see EventHandler): it
 // never runs concurrently with itself. The two feeds deliver through one
-// wamp.DeliveryGroup — opts' Group if it sets one, else a group of their own.
+// wamp.DeliveryGroup — opts' Group if it sets one, else a group of their own
+// — and so do the rows a catch-up delivers.
+//
+// The returned TableSubscription removes both feeds with its Unsubscribe, or
+// with IronFlock.Unsubscribe; each SubscribeToTable is a handle of its own,
+// also on a table subscribed already.
 func (f *IronFlock) SubscribeToTable(ctx context.Context, table string, handler EventHandler, opts ...SubscribeOptions) (*TableSubscription, error) {
 	if err := validateTopic("subscription", table); err != nil {
 		return nil, err
@@ -380,18 +452,36 @@ func (f *IronFlock) SubscribeToTable(ctx context.Context, table string, handler 
 	if handler == nil {
 		return nil, invalidf("Invalid subscription parameters: handler must not be nil")
 	}
-	if _, err := f.gate(ctx, 0); err != nil {
+	window, err := f.gate(ctx, f.reconnectWindow)
+	if err != nil {
 		return nil, operationFailed(fmt.Sprintf("Subscription to topic 'transformed.%s'", table), err)
 	}
-	return subscribeTable(ctx, f.conn, f.log, f.cleanupTimeout, table, handler, opts)
+	return subscribeTable(ctx, tableOrigin{conn: f.conn, log: f.log, cleanup: f.cleanupTimeout,
+		lifetime: f.lifetime, read: f.GetHistory, wait: window}, table, kindUnknown, handler, opts)
 }
 
-// subscribeTable subscribes handler to transformed.<table> and, unrolled to
-// one event per row, to transformed.bulk.<table>, both delivering through
-// one DeliveryGroup. When the second subscription fails the first is
-// removed again.
-func subscribeTable(ctx context.Context, conn wampConn, log *slog.Logger, cleanup time.Duration,
-	table string, handler EventHandler, opts []SubscribeOptions) (*TableSubscription, error) {
+// tableOrigin is where a table subscription lives: the connection of the app
+// or of a consumed app, and how to read the table there.
+type tableOrigin struct {
+	conn wampConn
+	log  *slog.Logger
+	// cleanup bounds removing a half-made subscription.
+	cleanup time.Duration
+	// lifetime ends when the app stops, or the consumed app closes.
+	lifetime context.Context
+	read     readFunc
+	// wait is how long each step of subscribing waits for a session (0: the
+	// connection's default).
+	wait time.Duration
+}
+
+// subscribeTable subscribes handler, through a tableFollower, to
+// transformed.<table> and, unrolled to one event per row, to
+// transformed.bulk.<table>, both delivering through one DeliveryGroup. kind
+// is what the table is, when the caller knows. When the second subscription
+// fails the first is removed again.
+func subscribeTable(ctx context.Context, o tableOrigin, table string, kind tableKind,
+	handler EventHandler, opts []SubscribeOptions) (*TableSubscription, error) {
 	if handler == nil {
 		return nil, invalidf("Invalid subscription parameters: handler must not be nil")
 	}
@@ -402,31 +492,47 @@ func subscribeTable(ctx context.Context, conn wampConn, log *slog.Logger, cleanu
 	if so.Group == nil {
 		so.Group = wamp.NewDeliveryGroup()
 	}
-	ts := &TableSubscription{conn: conn}
-	deliver := func(ev *Event) {
-		if !ts.closed.Load() {
-			handler(ev)
+	lifetime := o.lifetime
+	if lifetime == nil {
+		lifetime = context.Background()
+	}
+	rowsTopic := "transformed." + table
+	// The catch-up after a reconnect starts at the newest row stored when
+	// the subscription is made at the router: one issued while there is no
+	// session — before the first join, or in a reconnect gap — waits for the
+	// session first, and its follower starts from there. Rows stored before
+	// are history, not caught up on.
+	if !o.conn.IsOpen() {
+		if err := o.conn.WaitSession(ctx, o.wait); err != nil {
+			return nil, operationFailed(fmt.Sprintf("Subscription to topic '%s'", rowsTopic), err)
 		}
 	}
+	// The follower holds back live rows after a reconnect until it has
+	// delivered the ones stored while the connection was down. It follows
+	// the joins from before the subscription exists, so a rejoin while
+	// subscribing is caught up on too.
+	fl := newTableFollower(lifetime, o.conn, o.log, o.read, table, kind, handler, so.Group)
+	fl.attach()
 
-	rowsTopic := "transformed." + table
-	rows, err := conn.Subscribe(ctx, rowsTopic, deliver, so)
+	rows, err := o.conn.SubscribeWithin(ctx, rowsTopic, fl.deliverLive, so, o.wait)
 	if err != nil {
+		fl.stop()
 		return nil, operationFailed(fmt.Sprintf("Subscription to topic '%s'", rowsTopic), err)
 	}
+	fl.activate()
 
 	bulkTopic := "transformed.bulk." + table
-	bulk, err := conn.Subscribe(ctx, bulkTopic, unrollBulk(deliver, log), so)
+	bulk, err := o.conn.SubscribeWithin(ctx, bulkTopic, unrollBulk(fl.deliverLive, o.log), so, o.wait)
 	if err != nil {
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanup)
+		fl.stop()
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.cleanup)
 		defer cancel()
-		if uerr := conn.Unsubscribe(cctx, rows); uerr != nil {
-			log.Warn(fmt.Sprintf("Failed to remove the subscription to '%s' after the bulk subscription failed: %v", rowsTopic, uerr))
+		if uerr := o.conn.Unsubscribe(cctx, rows); uerr != nil {
+			o.log.Warn(fmt.Sprintf("Failed to remove the subscription to '%s' after the bulk subscription failed: %v", rowsTopic, uerr))
 		}
 		return nil, operationFailed(fmt.Sprintf("Subscription to topic '%s'", bulkTopic), err)
 	}
-	ts.Rows, ts.Bulk = rows, bulk
-	return ts, nil
+	return &TableSubscription{Rows: rows, Bulk: bulk, table: table, conn: o.conn, follower: fl}, nil
 }
 
 // unrollBulk wraps handler for a bulk feed, whose events carry the whole

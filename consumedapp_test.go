@@ -1211,7 +1211,7 @@ func TestConsumedAppMapsProviderRefusals(t *testing.T) {
 }
 
 func TestConsumedAppSubscribeToTable(t *testing.T) {
-	c := newConsumer(t)
+	c := newConsumer(t, WithReconnectWindow(5*time.Second))
 	app, err := c.ConnectToApp(bg, "weatherstation")
 	if err != nil {
 		t.Fatal(err)
@@ -1231,6 +1231,11 @@ func TestConsumedAppSubscribeToTable(t *testing.T) {
 	if subs[0].Opts.Group == nil || subs[0].Opts.Group != subs[1].Opts.Group {
 		t.Error("the feeds do not deliver through one DeliveryGroup")
 	}
+	for _, sub := range subs {
+		if sub.Window != 5*time.Second {
+			t.Errorf("%s waits %v for a session, want the consumer's reconnect window", sub.Topic, sub.Window)
+		}
+	}
 	if len(c.own.allSubs()) != 0 {
 		t.Error("subscribed on the own realm")
 	}
@@ -1242,6 +1247,53 @@ func TestConsumedAppSubscribeToTable(t *testing.T) {
 	}
 	if err := ts.Unsubscribe(bg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The provider's realm refusing a consumed app's table subscription — either
+// feed — is a *CrossAppAccessError with NOT_AUTHORIZED, as a refused read is,
+// and the feed subscribed already is removed again. Other refusals stay
+// operation errors.
+func TestConsumedAppSubscribeToTableRefusedIsNotAuthorized(t *testing.T) {
+	c := newConsumer(t)
+	app, err := c.ConnectToApp(bg, "weatherstation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := c.factory.all()[0]
+	refuse := func(feed, uri string) {
+		conn.mu.Lock()
+		defer conn.mu.Unlock()
+		conn.subscribeFn = func(topic string) error {
+			if topic == feed {
+				return wampErr(uri, "denied")
+			}
+			return nil
+		}
+	}
+	for _, uri := range []string{wamp.URINotAuthorized, wamp.URIAuthorizationFailed, wamp.URIAuthenticationFailed} {
+		for _, feed := range []string{"transformed.readings", "transformed.bulk.readings"} {
+			refuse(feed, uri)
+			ts, err := app.SubscribeToTable(bg, "readings", func(*Event) {})
+			var cerr *CrossAppAccessError
+			if ts != nil || !errors.As(err, &cerr) || cerr.Code != CodeNotAuthorized ||
+				cerr.Message != uri+`: "denied"` || WampURI(err) != uri {
+				t.Errorf("%s refusing %s: %v, %v", uri, feed, ts, err)
+			}
+		}
+	}
+	for _, s := range conn.allSubs() {
+		if !s.Removed {
+			t.Errorf("%s still subscribed after the bulk feed was refused", s.Topic)
+		}
+	}
+
+	refuse("transformed.readings", "wamp.error.invalid_uri")
+	_, err = app.SubscribeToTable(bg, "readings", func(*Event) {})
+	var oerr *OperationError
+	var cerr *CrossAppAccessError
+	if !errors.As(err, &oerr) || errors.As(err, &cerr) || WampURI(err) != "wamp.error.invalid_uri" {
+		t.Errorf("another refusal: %T %v", err, err)
 	}
 }
 

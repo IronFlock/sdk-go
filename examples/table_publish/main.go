@@ -27,7 +27,9 @@ func main() {
 	}
 	err = ifl.Run(context.Background(), func(ctx context.Context) error {
 		// One row, as a map ... Every row carries tsp, the table's mandatory
-		// timestamp column: the data backend drops a published row without it.
+		// timestamp column: the data backend refuses a row without it. A write
+		// rides out a platform restart for up to the reconnect window (60s by
+		// default), then fails; so does a refused row.
 		row := ironflock.Row{"tsp": time.Now(), "temperature": 22.5, "humidity": 60.0}
 		if err := ifl.PublishToTable(ctx, "sensordata", row); err != nil {
 			return err
@@ -52,7 +54,7 @@ func main() {
 			return err
 		}
 
-		// Append waits for the insert outcome, and reports a refused row.
+		// Append returns the insert outcome as well.
 		res, err := ifl.AppendToTable(ctx, "sensordata", ironflock.Row{"tsp": time.Now(), "temperature": 23.1, "humidity": 61.0})
 		if err != nil {
 			return err
@@ -61,7 +63,7 @@ func main() {
 
 		// Errors land in the fleet's error-logs table.
 		if _, err := ifl.ReportError(ctx, errors.New("sensor read timed out"),
-			ironflock.ReportErrorOptions{Level: ironflock.LevelWarn}); err != nil {
+			ironflock.ReportErrorOptions{Level: ironflock.LevelWarning}); err != nil {
 			return err
 		}
 		return nil

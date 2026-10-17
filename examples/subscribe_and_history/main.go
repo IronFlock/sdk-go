@@ -25,13 +25,15 @@ func main() {
 	}
 	err = ifl.Run(context.Background(), func(ctx context.Context) error {
 		// Realtime: one event per stored row, bulk inserts included. The
-		// subscription survives reconnects.
-		_, err := ifl.SubscribeToTable(ctx, "sensordata", func(ev *ironflock.Event) {
+		// subscription survives reconnects; the rows stored while the
+		// connection was down arrive after it.
+		ts, err := ifl.SubscribeToTable(ctx, "sensordata", func(ev *ironflock.Event) {
 			log.Printf("new row: %v", ev.Row())
 		})
 		if err != nil {
 			return err
 		}
+		log.Printf("following table %s (live: %v)", ts.Table(), ts.Active())
 
 		// Current value per entity.
 		latest, err := ifl.GetHistory(ctx, "sensordata", &ironflock.TableQueryParams{
@@ -81,6 +83,15 @@ func main() {
 		}
 
 		<-ctx.Done() // keep streaming until SIGINT/SIGTERM
+
+		// Run removes every subscription once main returns; a stream that
+		// is to end earlier ends like this: at once, both feeds, without
+		// waiting for a connection (ts.Unsubscribe(ctx) does the same).
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := ifl.Unsubscribe(cleanup, ts); err != nil {
+			log.Printf("unsubscribing from %s: %v", ts.Table(), err)
+		}
 		return nil
 	})
 	if err != nil {

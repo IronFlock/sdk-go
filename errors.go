@@ -160,18 +160,18 @@ const (
 	// VerifySecret) that filters on a secret column, whose stored values no
 	// predicate can match. Use VerifySecret to test a value.
 	URISecretColumn = "sys.dataservice.error.secret_column"
-	// URINotASecretColumn: VerifySecret with a column that is not a secret
-	// column, or RevealSecrets of a table that has no secret column.
+	// URINotASecretColumn: VerifySecret with a column that is not one of the
+	// table's secret columns. (A table without secret columns has no
+	// secret.reveal or secret.verify procedure: those calls fail as not
+	// registered.)
 	URINotASecretColumn = "sys.dataservice.error.not_a_secret_column"
-	// URIStorageFull: an append refused because the appliance's disk is
+	// URIStorageFull: a table write refused because the appliance's disk is
 	// nearly full (below about 3 GiB free; writes are accepted again from
 	// 4 GiB). Temporary, nothing stored is lost: hold the rows and append
-	// them later. A published row refused for this is dropped without a
-	// word to the publisher; only appends report it.
+	// them later.
 	URIStorageFull = "sys.dataservice.error.storage_full"
-	// URIStorageOverusage: an append refused because the account's storage
-	// allowance is used up; retrying soon does not help. Published rows are
-	// dropped likewise without a word.
+	// URIStorageOverusage: a table write refused because the account's storage
+	// allowance is used up; retrying soon does not help.
 	URIStorageOverusage = "sys.dataservice.error.storage_overusage"
 	// URIEntityKeyConflict: a write of a row whose entity key
 	// (maintainLatestFlagFor) and tsp another row has already — in the same
@@ -208,8 +208,15 @@ func operationFailed(op string, err error) error {
 // data-template or the app's data backend is not running.
 const historyHint = "Check that the table is declared in the app's data-template and that the app's data backend is running."
 
-// secretRPCHint replaces historyHint for the secret-column procedures.
-const secretRPCHint = "The app's data backend does not support secret columns yet — update it, then declare the column with `secret: true` in the app's data-template."
+// secretRPCHint replaces historyHint for the secret-column procedures. The
+// data backend registers secret.reveal.<table> and secret.verify.<table>
+// only for a table that declares a secret column, so that is the first
+// cause it names; then a table that is not declared at all, and last a data
+// backend older than secret columns. The Python and JavaScript SDKs use the
+// same text.
+const secretRPCHint = "The data backend registers it only for a table that declares a secret column: " +
+	"the table declares no secret column (mark one `secret: true` in the app's data-template), " +
+	"the table is not declared in the data-template, or the app's data backend predates secret columns (update it)."
 
 // historyFailed wraps a failed history-style RPC, spelling out the
 // not-registered case. secret selects the secret-column hint.

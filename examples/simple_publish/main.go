@@ -22,6 +22,8 @@ func main() {
 		ticker := time.NewTicker(3 * time.Second)
 		defer ticker.Stop()
 		for {
+			// Waits up to the reconnect window (60s by default) for a
+			// connection, then fails; it is sent once, never retried.
 			if err := ifl.Publish(ctx, "test.publish.example", map[string]any{"temperature": 20}); err != nil {
 				log.Print(err)
 			}

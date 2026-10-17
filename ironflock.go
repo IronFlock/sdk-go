@@ -28,9 +28,14 @@
 // table's data template reads tsp from another part of the message.
 //
 // The connection reconnects on its own and restores every subscription and
-// registered device function after a reconnect. Table operations ride out a
-// platform restart for up to the reconnect window (60s by default) before
-// they fail.
+// registered device function after a reconnect; a table subscription then
+// first gets the rows stored while the connection was down. Table writes and
+// reads ride out a platform restart for up to the reconnect window (60s by
+// default) before they fail — every table write, PublishToTable included,
+// calls the data backend's append procedures, so a row written while the
+// data backend restarts is not lost. Publish, Subscribe, SubscribeToTable and
+// RegisterDeviceFunction wait as long for the connection, and are not
+// retried.
 package ironflock
 
 import (
@@ -81,8 +86,9 @@ const (
 // It behaves like any other table (GetHistory, SubscribeToTable, boards).
 const ErrorLogsTable = "error-logs"
 
-// DefaultReconnectWindow is how long a table operation rides out a platform
-// restart by default (see WithReconnectWindow).
+// DefaultReconnectWindow is how long table writes and reads ride out a
+// platform restart by default, and Publish, Subscribe and
+// RegisterDeviceFunction wait for a connection (see WithReconnectWindow).
 const DefaultReconnectWindow = 60 * time.Second
 
 // Shutdown budgets.
@@ -159,15 +165,25 @@ func WithCredentials(authID, secret string) Option {
 	return func(c *config) { c.authID, c.authSecret = authID, secret }
 }
 
-// WithReconnectWindow sets how long a table operation (AppendToTable,
-// AppendRowsToTable, PublishToTable, PublishRowsToTable, ReportError,
-// GetHistory, GetSeriesHistory, RevealSecrets, VerifySecret, and a consumed
-// app's history reads) rides out a platform restart before it fails: it
-// waits that long for the connection to come back and for the platform to
-// serve the app's tables again. A table operation issued before Start waits
-// for Start within the same window. Default 60s; 0 turns it off (the
-// default 10s connection wait, no retries). Other operations, file calls
-// included, wait 10s for the connection and are not retried.
+// WithReconnectWindow sets how long a table call (PublishToTable,
+// AppendToTable, PublishRowsToTable, AppendRowsToTable, ReportError,
+// GetHistory, GetSeriesHistory, RevealSecrets, VerifySecret, a consumed
+// app's history reads, and the read that catches a table subscription up
+// after a reconnect) rides out a platform restart before it fails: it waits
+// that long for the connection to come back and for the platform to serve
+// the app's tables again. The table publishes are such calls: they append,
+// so a row written while the data backend restarts is not lost. Publish,
+// Subscribe, SubscribeToTable (a consumed app's too) and
+// RegisterDeviceFunction (with its aliases) wait as long for the
+// connection, and are not retried. An operation of either kind issued
+// before Start waits for Start within the same window.
+//
+// Default 60s (DefaultReconnectWindow). 0 turns the window off: these
+// operations then behave exactly like all other operations — they wait 10s
+// for the connection (before Start as well) and are not retried. Other
+// operations (Call, CallDeviceFunction, SetDeviceLocation, cross-app
+// discovery and opens, file calls) always do that. A negative d makes New
+// fail with an error wrapping ErrInvalidArgument.
 func WithReconnectWindow(d time.Duration) Option {
 	return func(c *config) { c.reconnectWindow = d }
 }
@@ -185,9 +201,9 @@ type wampConn interface {
 	URL() string
 	Call(ctx context.Context, procedure string, args []any, kwargs map[string]any, opts *wamp.CallOptions, retryWindow time.Duration) (*wamp.Result, error)
 	Publish(ctx context.Context, topic string, args []any, kwargs map[string]any, opts *wamp.PublishOptions, waitWindow time.Duration) error
-	Subscribe(ctx context.Context, topic string, handler wamp.EventHandler, opts *wamp.SubscribeOptions) (*wamp.Subscription, error)
+	SubscribeWithin(ctx context.Context, topic string, handler wamp.EventHandler, opts *wamp.SubscribeOptions, waitWindow time.Duration) (*wamp.Subscription, error)
 	Unsubscribe(ctx context.Context, sub *wamp.Subscription) error
-	Register(ctx context.Context, procedure string, handler wamp.InvocationHandler, opts *wamp.RegisterOptions) (*wamp.Registration, error)
+	RegisterWithin(ctx context.Context, procedure string, handler wamp.InvocationHandler, opts *wamp.RegisterOptions, waitWindow time.Duration) (*wamp.Registration, error)
 	Unregister(ctx context.Context, reg *wamp.Registration) error
 	WaitSession(ctx context.Context, timeout time.Duration) error
 }
@@ -201,10 +217,16 @@ type wampConn interface {
 // Operations may be issued before Start, for example by goroutines started
 // before Run: they wait for Start to configure the connection, and then for
 // the connection, within the time they wait for a connection anyway — the
-// reconnect window for table operations (see WithReconnectWindow), 10s for
-// the others, file calls included. When that time passes first they fail
-// with an error wrapping wamp.ErrNotConnected, and Stop makes them fail with
-// one wrapping wamp.ErrStopped.
+// reconnect window for table operations, Publish, Subscribe and
+// RegisterDeviceFunction (see WithReconnectWindow), 10s for the others, file
+// calls included. When that time passes first they fail
+// with an error wrapping wamp.ErrNotConnected. Stop ends every such wait at
+// once — for Start or for the connection — with an error wrapping
+// wamp.ErrStopped.
+//
+// Unsubscribe and Unregister, and the handles' own Unsubscribe and
+// Unregister methods, never wait for a connection: while it is down they
+// remove the subscription or registration locally and return.
 type IronFlock struct {
 	log *slog.Logger
 
@@ -291,6 +313,9 @@ func newWithConn(conn wampConn, newConn func() wampConn, opts ...Option) (*IronF
 	if (c.authID == "") != (c.authSecret == "") {
 		return nil, invalidf("WithCredentials needs both an auth id and a secret")
 	}
+	if c.reconnectWindow < 0 {
+		return nil, invalidf("WithReconnectWindow must not be negative, got %v (0 turns the window off)", c.reconnectWindow)
+	}
 
 	f := &IronFlock{
 		log:             log,
@@ -305,7 +330,7 @@ func newWithConn(conn wampConn, newConn func() wampConn, opts ...Option) (*IronF
 		url:             c.url,
 		authID:          c.authID,
 		authSecret:      c.authSecret,
-		reconnectWindow: max(c.reconnectWindow, 0),
+		reconnectWindow: c.reconnectWindow,
 		conn:            conn,
 		newConn:         newConn,
 		consumed:        make(map[string]*consumedEntry),
@@ -459,13 +484,19 @@ func (f *IronFlock) awaitStart(ctx context.Context, window time.Duration) (rest 
 	case <-f.lifetime.Done():
 		return 0, true, wamp.ErrStopped
 	case <-timer.C:
-		return 0, true, fmt.Errorf("ironflock: the connection was not started within %v: %w", window, wamp.ErrNotConnected)
+		return 0, true, fmt.Errorf("ironflock: the connection was not started within %s: %w", seconds(window), wamp.ErrNotConnected)
 	case <-ctx.Done():
 		if f.lifetime.Err() != nil {
 			return 0, true, wamp.ErrStopped // ctx may be lifetime itself
 		}
 		return 0, true, ctx.Err()
 	}
+}
+
+// seconds writes d in seconds, as the connection's not-connected error names
+// its wait: "60s", "0.5s".
+func seconds(d time.Duration) string {
+	return strconv.FormatFloat(d.Seconds(), 'g', -1, 64) + "s"
 }
 
 // gate holds an operation issued before Start (see awaitStart) and returns
@@ -582,20 +613,23 @@ func (f *IronFlock) routerURL() (string, error) {
 // main).
 type runContextKey struct{ f *IronFlock }
 
-// Stop closes every consumed-app connection and the connection itself, and
-// waits for that within ctx. It is idempotent: a later Stop waits for the
-// first one within its own ctx. Stop is final.
+// Stop closes every consumed-app connection and the connection itself,
+// concurrently, and waits for that within ctx. It is idempotent: a later Stop
+// waits for the first one within its own ctx. Stop is final.
 //
 // Stop first ends what waits on the instance: consumed-app connections still
 // opening are aborted (their ConnectToApp fails with an error wrapping
-// wamp.ErrStopped), operations waiting for Start fail with wamp.ErrStopped,
-// and the context Run passes to main is cancelled, so Run returns once main
-// does. Stop does not wait for main, which may call Stop itself — even with
-// that context, or one derived from it (in another IronFlock's Run, say):
-// Stop does not let it cut the shutdown short, but stops within 10s, like the
-// Stop Run performs after main. Neither the deadline that context inherits
-// from Run's nor one main sets on it bounds the shutdown further. Afterwards
-// operations fail with an error wrapping wamp.ErrStopped.
+// wamp.ErrStopped); operations waiting for Start or for the connection —
+// within the reconnect window or the 10s wait of the others — or between the
+// retries of a table call fail at once with an error wrapping
+// wamp.ErrStopped; and the context Run passes to main is cancelled, so Run
+// returns once main does. Stop does not wait for main, which may call Stop
+// itself — even with that context, or one derived from it (in another
+// IronFlock's Run, say): Stop does not let it cut the shutdown short, but
+// stops within 10s, like the Stop Run performs after main. Neither the
+// deadline that context inherits from Run's nor one main sets on it bounds
+// the shutdown further. Afterwards operations fail with an error wrapping
+// wamp.ErrStopped.
 //
 // Stop also closes the idle HTTP connections of the store Files returns (see
 // filestore.FileStore.CloseIdleConnections): a direct transfer still in
@@ -636,8 +670,13 @@ func (f *IronFlock) Stop(ctx context.Context) error {
 	// closes its own connection: see runOpen), wake the operations waiting
 	// for Start and end Run's main context.
 	f.endLifetime()
+	// The connection is stopped alongside the consumed apps, not after them:
+	// its Stop ends the operations waiting for it at once, which must not
+	// wait for a consumed app's goodbye.
+	stopped := make(chan error, 1)
+	go func() { stopped <- f.conn.Stop(ctx) }()
 	f.closeConsumed(ctx, entries)
-	err := f.conn.Stop(ctx)
+	err := <-stopped
 	f.mu.Lock()
 	files := f.files
 	f.mu.Unlock()

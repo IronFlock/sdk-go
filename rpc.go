@@ -27,7 +27,14 @@ func validateTopic(group, topic string) error {
 }
 
 // Subscribe subscribes handler to topic. The subscription is restored after
-// every reconnect.
+// every reconnect. The returned Subscription is its handle: Unsubscribe
+// removes it (as IronFlock.Unsubscribe does), Topic and Match describe it,
+// and Active reports whether it is live at the router. Each Subscribe is a
+// handle of its own, also on a topic subscribed already.
+//
+// Subscribe waits up to the reconnect window (see WithReconnectWindow) for a
+// connection, so a short outage does not make it fail, and is not retried;
+// without a window it waits 10s.
 func (f *IronFlock) Subscribe(ctx context.Context, topic string, handler EventHandler, opts ...SubscribeOptions) (*Subscription, error) {
 	if err := validateTopic("subscription", topic); err != nil {
 		return nil, err
@@ -35,23 +42,59 @@ func (f *IronFlock) Subscribe(ctx context.Context, topic string, handler EventHa
 	if handler == nil {
 		return nil, invalidf("Invalid subscription parameters: handler must not be nil")
 	}
-	if _, err := f.gate(ctx, 0); err != nil {
+	window, err := f.gate(ctx, f.reconnectWindow)
+	if err != nil {
 		return nil, operationFailed(fmt.Sprintf("Subscription to topic '%s'", topic), err)
 	}
-	sub, err := f.conn.Subscribe(ctx, topic, handler, firstSubscribeOptions(opts))
+	sub, err := f.conn.SubscribeWithin(ctx, topic, handler, firstSubscribeOptions(opts), window)
 	if err != nil {
 		return nil, operationFailed(fmt.Sprintf("Subscription to topic '%s'", topic), err)
 	}
 	return sub, nil
 }
 
-// Unsubscribe removes a subscription as wamp.Connection.Unsubscribe does: at
-// once, the handler is called for no further event.
-func (f *IronFlock) Unsubscribe(ctx context.Context, sub *Subscription) error {
-	if sub == nil {
+// Unsubscriber is a subscription handle IronFlock.Unsubscribe removes: a
+// *Subscription, which Subscribe returns, or a *TableSubscription, which
+// SubscribeToTable returns for a table of the app's own or of a consumed
+// app.
+type Unsubscriber interface {
+	Unsubscribe(ctx context.Context) error
+}
+
+var (
+	_ Unsubscriber = (*Subscription)(nil)
+	_ Unsubscriber = (*TableSubscription)(nil)
+)
+
+// Unsubscribe removes a subscription: a *Subscription or a *TableSubscription
+// (also a consumed app's), the same as calling the handle's own Unsubscribe —
+// a *Subscription's error is wrapped in an *OperationError, like the errors of
+// the other operations. A nil handle is a no-op.
+//
+// It takes effect at once: the handler is called for no further event — not
+// for an event still queued, nor for the remaining rows of a bulk event, nor
+// for a row a catch-up would deliver — though a call already under way is not
+// waited for (a handler may unsubscribe itself). The subscription is never
+// restored after a reconnect.
+//
+// Unsubscribe does not wait for a connection: while it is down, the
+// subscription is removed locally and Unsubscribe returns (the router dropped
+// the session's subscriptions with the session). While connected, it returns
+// once the router has answered; a refusal is returned, and the local removal
+// stands. A second call is a no-op, as is a call after Stop. Two handles on
+// one topic are independent: removing one leaves the other subscribed (the
+// WAMP subscription ends with the topic's last handler).
+func (f *IronFlock) Unsubscribe(ctx context.Context, sub Unsubscriber) error {
+	switch h := sub.(type) {
+	case nil:
 		return nil
+	case *Subscription:
+		if h == nil {
+			return nil
+		}
+		return operationFailed(fmt.Sprintf("Unsubscribe from topic '%s'", h.Topic()), f.conn.Unsubscribe(ctx, h))
 	}
-	return operationFailed(fmt.Sprintf("Unsubscribe from topic '%s'", sub.Topic()), f.conn.Unsubscribe(ctx, sub))
+	return sub.Unsubscribe(ctx) // a *TableSubscription wraps its errors itself
 }
 
 // Call calls a remote procedure by its full WAMP URI. Positional args are
@@ -108,7 +151,9 @@ func (f *IronFlock) CallFunction(ctx context.Context, deviceKey int, topic strin
 // this app (and dashboard widget actions) can call:
 // <SWARM_KEY>.<DEVICE_KEY>.<APP_KEY>.<STAGE>.<topic>. The router accepts
 // only this shape and single registrations. The registration is restored
-// after every reconnect.
+// after every reconnect. The returned Registration is its handle: Unregister
+// removes it (as IronFlock.Unregister does), Procedure returns the full URI,
+// and Active reports whether it is live at the router.
 //
 // What handler returns is sent as the package sends every payload (see
 // Kwargs): its result value, the Args and Kwargs of a Result (or *Result) it
@@ -119,6 +164,10 @@ func (f *IronFlock) CallFunction(ctx context.Context, deviceKey int, topic strin
 // result that cannot be converted (a channel, a function, a complex number)
 // is answered with wamp.error.runtime_error naming the reason, and logged as
 // an error here.
+//
+// RegisterDeviceFunction waits up to the reconnect window (see
+// WithReconnectWindow) for a connection, as Subscribe does, and is not
+// retried; without a window it waits 10s.
 func (f *IronFlock) RegisterDeviceFunction(ctx context.Context, topic string, handler InvocationHandler, opts ...RegisterOptions) (*Registration, error) {
 	full, err := f.deviceFunctionURI(topic, f.deviceKey, "DEVICE_KEY")
 	if err != nil {
@@ -133,10 +182,11 @@ func (f *IronFlock) RegisterDeviceFunction(ctx context.Context, topic string, ha
 		ro = &o
 	}
 	op := fmt.Sprintf("Registration of procedure '%s'", full)
-	if _, err := f.gate(ctx, 0); err != nil {
+	window, err := f.gate(ctx, f.reconnectWindow)
+	if err != nil {
 		return nil, operationFailed(op, err)
 	}
-	reg, err := f.conn.Register(ctx, full, f.normalizedHandler(full, handler), ro)
+	reg, err := f.conn.RegisterWithin(ctx, full, f.normalizedHandler(full, handler), ro, window)
 	if err != nil {
 		return nil, operationFailed(op, err)
 	}
@@ -233,8 +283,18 @@ func (f *IronFlock) Register(ctx context.Context, topic string, handler Invocati
 	return f.RegisterDeviceFunction(ctx, topic, handler, opts...)
 }
 
-// Unregister removes a registration as wamp.Connection.Unregister does: at
-// once, the handler is called no more.
+// Unregister removes a registration RegisterDeviceFunction (or Register,
+// RegisterFunction) returned, the same as reg.Unregister — its error wrapped
+// in an *OperationError, like the errors of the other operations. A nil reg
+// is a no-op.
+//
+// It removes the registration as wamp.Connection.Unregister does: at once,
+// the handler is called no more, and the registration is never restored
+// after a reconnect. Unregister does not wait for a connection: while it is
+// down, the registration is removed locally and Unregister returns. While
+// connected, it returns once the router has answered; a refusal is returned,
+// and the local removal stands. A second call is a no-op, as is a call after
+// Stop.
 func (f *IronFlock) Unregister(ctx context.Context, reg *Registration) error {
 	if reg == nil {
 		return nil

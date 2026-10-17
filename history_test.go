@@ -261,10 +261,39 @@ func TestRevealSecrets(t *testing.T) {
 
 	fail(f.own, errors.New("no callee registered for procedure"))
 	_, err = f.RevealSecrets(bg, "credentials", nil)
+	// The text the three SDKs share, after the procedure part.
 	want2 := "revealSecrets('credentials') failed: procedure 'secret.reveal.credentials' is not registered. " +
-		"The app's data backend does not support secret columns yet — update it, then declare the column with `secret: true` in the app's data-template."
+		"The data backend registers it only for a table that declares a secret column: " +
+		"the table declares no secret column (mark one `secret: true` in the app's data-template), " +
+		"the table is not declared in the data-template, or the app's data backend predates secret columns (update it)."
 	if err == nil || err.Error() != want2 {
 		t.Errorf("error %v\nwant %q", err, want2)
+	}
+	wantSecretCausesInOrder(t, err)
+}
+
+// wantSecretCausesInOrder fails unless err, a secret procedure that is not
+// registered, names its causes most likely first: the data backend registers
+// secret.reveal and secret.verify only for a table that declares a secret
+// column, so a table without one comes first, then a table that is not
+// declared, then a data backend older than secret columns.
+func wantSecretCausesInOrder(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("no error")
+	}
+	msg := err.Error()
+	last := -1
+	for _, cause := range []string{"declares no secret column", "`secret: true`", "is not declared", "predates secret columns"} {
+		i := strings.Index(msg, cause)
+		if i < 0 {
+			t.Errorf("%q does not name %q", msg, cause)
+			return
+		}
+		if i < last {
+			t.Errorf("%q names %q out of order", msg, cause)
+		}
+		last = i
 	}
 }
 
@@ -347,8 +376,12 @@ func TestVerifySecretValidationAndErrors(t *testing.T) {
 	}
 	fail(f.own, wampErr(wamp.URINoSuchProcedure))
 	_, err = f.VerifySecret(bg, "credentials", "api_key", "x", nil)
-	mustContain(t, err.Error(), "verifySecret('credentials') failed: procedure 'secret.verify.credentials' is not registered.",
-		"does not support secret columns yet")
+	mustContain(t, err.Error(), "verifySecret('credentials') failed: procedure 'secret.verify.credentials' is not registered. "+
+		"The data backend registers it only for a table that declares a secret column: the table declares no secret column")
+	wantSecretCausesInOrder(t, err)
+	if WampURI(err) != wamp.URINoSuchProcedure {
+		t.Errorf("the hint hides the refusal: %v", err)
+	}
 }
 
 // row returns a row with the given tsp.

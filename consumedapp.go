@@ -150,6 +150,10 @@ type ConsumedApp struct {
 	closeOnce       sync.Once
 	log             *slog.Logger
 	cleanupTimeout  time.Duration
+	// lifetime ends when the handle is closed or denied for good, and when
+	// the IronFlock stops: its table subscriptions stop catching up then.
+	lifetime    context.Context
+	endLifetime context.CancelFunc
 }
 
 // Connection returns the underlying connection to the provider's realm.
@@ -355,11 +359,34 @@ func (a *ConsumedApp) GetSeriesHistory(ctx context.Context, table string, q Seri
 // SubscribeToTable subscribes handler to realtime rows of a shared table or
 // transform, exactly like IronFlock.SubscribeToTable — a transform's events
 // carry the whole view (see Event.Rows).
+//
+// A table's rows stored while the connection was down arrive after the
+// reconnect: the handler first gets them, oldest first, as with
+// IronFlock.SubscribeToTable. It waits for a session as that does, up to the
+// reconnect window, and is not retried.
+//
+// The returned TableSubscription is the same handle as the app's own:
+// its Unsubscribe, or IronFlock.Unsubscribe, removes both feeds; Close
+// ends every subscription of the consumed app.
+//
+// Errors: *CrossAppAccessError with PRIVATE_TABLE for a name outside the
+// shared catalog, and NOT_AUTHORIZED when the provider's realm refuses the
+// subscription (wamp.error.not_authorized, authorization_failed or
+// authentication_failed), as for the reads.
 func (a *ConsumedApp) SubscribeToTable(ctx context.Context, table string, handler EventHandler, opts ...SubscribeOptions) (*TableSubscription, error) {
 	if err := a.assertInCatalog(table); err != nil {
 		return nil, err
 	}
-	return subscribeTable(ctx, a.conn, a.log, a.cleanupTimeout, table, handler, opts)
+	kind := kindTable
+	if slices.ContainsFunc(a.Transforms, func(t TableInfo) bool { return t.Tablename == table }) {
+		kind = kindTransform
+	}
+	ts, err := subscribeTable(ctx, tableOrigin{conn: a.conn, log: a.log, cleanup: a.cleanupTimeout,
+		lifetime: a.lifetime, read: a.GetHistory, wait: a.reconnectWindow}, table, kind, handler, opts)
+	if cerr := mapCrossAppError(err); cerr != nil {
+		return nil, cerr
+	}
+	return ts, err
 }
 
 // Close closes the connection to the provider. IronFlock.Stop closes all
@@ -382,6 +409,9 @@ func (a *ConsumedApp) close(ctx context.Context) error {
 	a.closeOnce.Do(func() {
 		if a.onClosed != nil {
 			a.onClosed()
+		}
+		if a.endLifetime != nil {
+			a.endLifetime()
 		}
 	})
 	return a.conn.Stop(ctx)
@@ -727,6 +757,15 @@ func (f *IronFlock) openFromInfo(ctx context.Context, info *ConsumedAppInfo, sta
 		opened bool
 		denied *CrossAppAccessError
 	)
+	// The handle's lifetime (see ConsumedApp): ended here unless the open
+	// hands it over.
+	lifetime, endLifetime := context.WithCancel(f.lifetime)
+	handedOver := false
+	defer func() {
+		if !handedOver {
+			endLifetime()
+		}
+	}()
 	cfg := wamp.Config{
 		SwarmKey:        f.swarmKey,
 		AppKey:          info.ProviderAppKey,
@@ -749,6 +788,7 @@ func (f *IronFlock) openFromInfo(ctx context.Context, info *ConsumedAppInfo, sta
 			if !wasOpened {
 				return // the pending open returns the denial itself
 			}
+			endLifetime() // the handle is dead: its table subscriptions stop
 			f.log.Warn(err.Error())
 			go func() {
 				// The connection gave up for good; release it.
@@ -795,6 +835,7 @@ func (f *IronFlock) openFromInfo(ctx context.Context, info *ConsumedAppInfo, sta
 		return nil, d
 	}
 
+	handedOver = true
 	return &ConsumedApp{
 		App:             info.App,
 		Stage:           stage,
@@ -805,6 +846,8 @@ func (f *IronFlock) openFromInfo(ctx context.Context, info *ConsumedAppInfo, sta
 		onClosed:        evict,
 		log:             f.log,
 		cleanupTimeout:  f.cleanupTimeout,
+		lifetime:        lifetime,
+		endLifetime:     endLifetime,
 	}, nil
 }
 

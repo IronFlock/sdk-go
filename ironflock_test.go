@@ -147,14 +147,34 @@ func TestNewCredentialsAreBothOrNeither(t *testing.T) {
 }
 
 func TestNewReconnectWindow(t *testing.T) {
-	for _, tc := range []struct {
-		opt  time.Duration
-		want time.Duration
-	}{{0, 0}, {-time.Second, 0}, {90 * time.Second, 90 * time.Second}} {
-		f := flock(t, WithReconnectWindow(tc.opt))
-		if f.reconnectWindow != tc.want {
-			t.Errorf("WithReconnectWindow(%v) = %v, want %v", tc.opt, f.reconnectWindow, tc.want)
+	if f := flock(t); f.reconnectWindow != DefaultReconnectWindow || DefaultReconnectWindow != 60*time.Second {
+		t.Errorf("default window %v (DefaultReconnectWindow %v), want 60s", f.reconnectWindow, DefaultReconnectWindow)
+	}
+	for _, d := range []time.Duration{0, time.Nanosecond, 90 * time.Second} {
+		if f := flock(t, WithReconnectWindow(d)); f.reconnectWindow != d {
+			t.Errorf("WithReconnectWindow(%v) = %v", d, f.reconnectWindow)
 		}
+	}
+	// A negative window is refused, not taken for 0; the last option counts.
+	for _, opts := range [][]Option{
+		{WithReconnectWindow(-time.Second)},
+		{WithReconnectWindow(-time.Nanosecond)},
+		{WithReconnectWindow(time.Minute), WithReconnectWindow(-time.Minute)},
+	} {
+		for name, create := range map[string]func() (*IronFlock, error){
+			"newWithConn": func() (*IronFlock, error) { return newWithConn(&fakeConn{}, nil, opts...) },
+			"New":         func() (*IronFlock, error) { return New(opts...) },
+		} {
+			f, err := create()
+			if f != nil || !errors.Is(err, ErrInvalidArgument) {
+				t.Errorf("%s with a negative window = %v, %v, want an error wrapping ErrInvalidArgument", name, f, err)
+				continue
+			}
+			mustContain(t, err.Error(), "WithReconnectWindow must not be negative")
+		}
+	}
+	if _, err := newWithConn(&fakeConn{}, nil, WithReconnectWindow(-time.Minute), WithReconnectWindow(0)); err != nil {
+		t.Errorf("a negative window overridden by 0: %v", err)
 	}
 }
 
@@ -650,83 +670,103 @@ func TestNewUsesAWampConnection(t *testing.T) {
 // gatedOp is an operation run on an IronFlock that has not been started.
 type gatedOp struct {
 	name string
-	// table is set for table operations, which wait within the reconnect
-	// window; the others wait the default session wait.
-	table bool
-	do    func(f *testFlock) error
+	kind opKind
+	do   func(f *testFlock) error
 }
+
+// opKind tells how long an operation waits for a connection, and whether it
+// is retried.
+type opKind int
+
+const (
+	// plainOp waits the default session wait, and is not retried.
+	plainOp opKind = iota
+	// windowOp waits within the reconnect window, and is not retried:
+	// Publish, Subscribe, SubscribeToTable, RegisterDeviceFunction.
+	windowOp
+	// tableOp waits within the reconnect window, and retries a call the
+	// data backend does not serve yet.
+	tableOp
+)
+
+// windowed reports whether op waits within the reconnect window.
+func (op gatedOp) windowed() bool { return op.kind != plainOp }
 
 func gatedOps() []gatedOp {
 	noop := func(context.Context, *Invocation) (any, error) { return nil, nil }
 	q := &TableQueryParams{Limit: 1}
 	return []gatedOp{
-		{"PublishToTable", true, func(f *testFlock) error { return f.PublishToTable(bg, "sensordata", Row{"temp": 1}) }},
-		{"PublishRowsToTable", true, func(f *testFlock) error {
+		{"PublishToTable", tableOp, func(f *testFlock) error { return f.PublishToTable(bg, "sensordata", Row{"temp": 1}) }},
+		{"PublishRowsToTable", tableOp, func(f *testFlock) error {
 			return f.PublishRowsToTable(bg, "sensordata", []Row{{"temp": 1}})
 		}},
-		{"AppendToTable", true, func(f *testFlock) error {
+		{"AppendToTable", tableOp, func(f *testFlock) error {
 			_, err := f.AppendToTable(bg, "sensordata", Row{"temp": 1})
 			return err
 		}},
-		{"AppendRowsToTable", true, func(f *testFlock) error {
+		{"AppendRowsToTable", tableOp, func(f *testFlock) error {
 			_, err := f.AppendRowsToTable(bg, "sensordata", []Row{{"temp": 1}})
 			return err
 		}},
-		{"ReportError", true, func(f *testFlock) error {
+		{"ReportError", tableOp, func(f *testFlock) error {
 			_, err := f.ReportError(bg, "boom")
 			return err
 		}},
-		{"GetHistory", true, func(f *testFlock) error {
+		{"ReportError with Append", tableOp, func(f *testFlock) error {
+			_, err := f.ReportError(bg, "boom", ReportErrorOptions{Append: true})
+			return err
+		}},
+		{"GetHistory", tableOp, func(f *testFlock) error {
 			_, err := f.GetHistory(bg, "sensordata", q)
 			return err
 		}},
-		{"GetSeriesHistory", true, func(f *testFlock) error {
+		{"GetSeriesHistory", tableOp, func(f *testFlock) error {
 			_, err := f.GetSeriesHistory(bg, "sensordata", SeriesQueryParams{
 				Metrics: []SeriesMetric{{"temp", MethodAvg}}, Limit: 1, TimeRange: &TimeRange{Start: int64(0)}})
 			return err
 		}},
-		{"RevealSecrets", true, func(f *testFlock) error {
+		{"RevealSecrets", tableOp, func(f *testFlock) error {
 			_, err := f.RevealSecrets(bg, "sensordata", q)
 			return err
 		}},
-		{"VerifySecret", true, func(f *testFlock) error {
+		{"VerifySecret", tableOp, func(f *testFlock) error {
 			_, err := f.VerifySecret(bg, "sensordata", "pin", "1234", q)
 			return err
 		}},
-		{"Publish", false, func(f *testFlock) error { return f.Publish(bg, "com.example.topic", 1) }},
-		{"Call", false, func(f *testFlock) error {
+		{"Publish", windowOp, func(f *testFlock) error { return f.Publish(bg, "com.example.topic", 1) }},
+		{"Call", plainOp, func(f *testFlock) error {
 			_, err := f.Call(bg, "com.example.procedure")
 			return err
 		}},
-		{"CallDeviceFunction", false, func(f *testFlock) error {
+		{"CallDeviceFunction", plainOp, func(f *testFlock) error {
 			_, err := f.CallDeviceFunction(bg, 13, "toggle")
 			return err
 		}},
-		{"SetDeviceLocation", false, func(f *testFlock) error {
+		{"SetDeviceLocation", plainOp, func(f *testFlock) error {
 			_, err := f.SetDeviceLocation(bg, 8.4, 49.0)
 			return err
 		}},
-		{"Subscribe", false, func(f *testFlock) error {
+		{"Subscribe", windowOp, func(f *testFlock) error {
 			_, err := f.Subscribe(bg, "com.example.topic", func(*Event) {})
 			return err
 		}},
-		{"SubscribeToTable", false, func(f *testFlock) error {
+		{"SubscribeToTable", windowOp, func(f *testFlock) error {
 			_, err := f.SubscribeToTable(bg, "sensordata", func(*Event) {})
 			return err
 		}},
-		{"RegisterDeviceFunction", false, func(f *testFlock) error {
+		{"RegisterDeviceFunction", windowOp, func(f *testFlock) error {
 			_, err := f.RegisterDeviceFunction(bg, "toggle", noop)
 			return err
 		}},
-		{"ListConsumableApps", false, func(f *testFlock) error {
+		{"ListConsumableApps", plainOp, func(f *testFlock) error {
 			_, err := f.ListConsumableApps(bg)
 			return err
 		}},
-		{"ConnectToApp", false, func(f *testFlock) error {
+		{"ConnectToApp", plainOp, func(f *testFlock) error {
 			_, err := f.ConnectToApp(bg, "weatherstation")
 			return err
 		}},
-		{"Files().Catalog", false, func(f *testFlock) error {
+		{"Files().Catalog", plainOp, func(f *testFlock) error {
 			_, err := f.Files().Catalog(bg)
 			return err
 		}},
@@ -792,32 +832,55 @@ func TestOperationsBeforeStartKeepTheirWindow(t *testing.T) {
 	const window = time.Hour
 	f := unstartedFlock(t, WithReconnectWindow(window))
 	answerServices(f.own)
-	errs := make(chan error, 3)
-	go func() { errs <- f.PublishToTable(bg, "sensordata", Row{"temp": 1}) }()
-	go func() {
-		_, err := f.AppendToTable(bg, "sensordata", Row{"temp": 1})
-		errs <- err
-	}()
-	go func() {
-		_, err := f.Call(bg, "com.example.procedure")
-		errs <- err
-	}()
-	eventually(t, "the operations to wait for Start", func() bool { return f.startWaiters.Load() == 3 })
+	ops := []func() error{
+		func() error { return f.PublishToTable(bg, "sensordata", Row{"temp": 1}) },
+		func() error {
+			_, err := f.AppendToTable(bg, "sensordata", Row{"temp": 1})
+			return err
+		},
+		func() error { return f.Publish(bg, "com.example.topic", 1) },
+		func() error {
+			_, err := f.Subscribe(bg, "com.example.topic", func(*Event) {})
+			return err
+		},
+		func() error {
+			_, err := f.RegisterDeviceFunction(bg, "toggle", func(context.Context, *Invocation) (any, error) { return nil, nil })
+			return err
+		},
+		func() error {
+			_, err := f.Call(bg, "com.example.procedure")
+			return err
+		},
+	}
+	errs := make(chan error, len(ops))
+	for _, op := range ops {
+		go func() { errs <- op() }()
+	}
+	eventually(t, "the operations to wait for Start", func() bool { return f.startWaiters.Load() == int32(len(ops)) })
 	f.start(t)
-	for range 3 {
+	for range ops {
 		if err := recv(t, errs, "an operation"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	within := func(d, of time.Duration) bool { return d > of-5*time.Second && d <= of }
 	if w := f.own.lastPublish(t).Window; !within(w, window) {
-		t.Errorf("PublishToTable waits %v for a session, want what is left of %v", w, window)
+		t.Errorf("Publish waits %v for a session, want what is left of %v", w, window)
+	}
+	if subs := f.own.allSubs(); len(subs) != 1 || !within(subs[0].Window, window) {
+		t.Errorf("subscriptions %#v, want one waiting what is left of %v", subs, window)
+	}
+	if regs := f.own.allRegs(); len(regs) != 1 || !within(regs[0].Window, window) {
+		t.Errorf("registrations %#v, want one waiting what is left of %v", regs, window)
+	}
+	if n := len(f.own.callsTo("append.10.20.sensordata")); n != 2 {
+		t.Errorf("%d appends, want 2 (PublishToTable appends)", n)
 	}
 	for _, c := range f.own.allCalls() {
 		switch c.Procedure {
 		case "append.10.20.sensordata":
 			if !within(c.Window, window) {
-				t.Errorf("AppendToTable retries for %v, want what is left of %v", c.Window, window)
+				t.Errorf("a table write retries for %v, want what is left of %v", c.Window, window)
 			}
 		case "com.example.procedure":
 			if c.Window != 0 {
@@ -844,7 +907,7 @@ func TestOperationsBeforeStartTimeOut(t *testing.T) {
 			f := unstartedFlock(t, WithReconnectWindow(window))
 			f.sessionWait = sessionWait
 			want := sessionWait
-			if op.table {
+			if op.windowed() {
 				want = window
 			}
 			began := time.Now()
@@ -853,20 +916,38 @@ func TestOperationsBeforeStartTimeOut(t *testing.T) {
 			if !errors.Is(err, wamp.ErrNotConnected) || errors.Is(err, wamp.ErrNotConfigured) {
 				t.Fatalf("%s = %v, want an error wrapping ErrNotConnected", op.name, err)
 			}
-			mustContain(t, err.Error(), "the connection was not started within "+want.String())
+			// The wait is named in seconds, as the connection names its own.
+			mustContain(t, err.Error(), "the connection was not started within "+inSeconds(want)+":")
 			if took < want {
 				t.Errorf("%s failed after %v, before its window of %v", op.name, took, want)
 			}
 		})
 	}
-	// Without a reconnect window, table operations wait the default.
-	f := unstartedFlock(t, WithReconnectWindow(0))
-	f.sessionWait = sessionWait
-	err := f.PublishToTable(bg, "sensordata", Row{"temp": 1})
-	if !errors.Is(err, wamp.ErrNotConnected) || !strings.Contains(err.Error(), "within "+sessionWait.String()) {
-		t.Errorf("PublishToTable without a reconnect window = %v", err)
+	// Without a reconnect window, the operations that use it wait the
+	// default, as the others do.
+	for _, op := range gatedOps() {
+		if !op.windowed() {
+			continue
+		}
+		f := unstartedFlock(t, WithReconnectWindow(0))
+		f.sessionWait = sessionWait
+		began := time.Now()
+		err := op.do(f)
+		if !errors.Is(err, wamp.ErrNotConnected) || !strings.Contains(err.Error(), "within "+inSeconds(sessionWait)+":") {
+			t.Errorf("%s without a reconnect window = %v", op.name, err)
+		}
+		if took := time.Since(began); took < sessionWait {
+			t.Errorf("%s without a reconnect window failed after %v, before the default wait %v", op.name, took, sessionWait)
+		}
+	}
+	// The default reconnect window, a minute, is named in seconds too.
+	if got, want := seconds(DefaultReconnectWindow), "60s"; got != want {
+		t.Errorf("seconds(%v) = %q, want %q", DefaultReconnectWindow, got, want)
 	}
 }
+
+// inSeconds writes d as the not-connected errors name a wait: in seconds.
+func inSeconds(d time.Duration) string { return fmt.Sprintf("%gs", d.Seconds()) }
 
 // Stop wakes the operations waiting for Start: they fail with an error
 // wrapping wamp.ErrStopped, as do operations issued after it.
