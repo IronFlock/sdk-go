@@ -1,4 +1,4 @@
-# golangci-lint v2 configuration, used by `just check` and CI.
+# golangci-lint v2 configuration (run by `just lint`, and by CI through it).
 version: "2"
 
 run:
@@ -10,6 +10,25 @@ run:
 linters:
   # errcheck, govet, ineffassign, staticcheck and unused.
   default: standard
+  enable:
+    - gosec
+  settings:
+    gosec:
+      excludes:
+        # Integer-conversion overflow: flags every int -> int32/uint64 id or
+        # counter conversion; the values are bounded where they enter.
+        - G115
+  exclusions:
+    rules:
+      # Test doubles ignore write/close errors and use fixed paths and
+      # permissions on purpose.
+      - path: _test\.go
+        linters: [errcheck, gosec]
+      # The env mirror files are read from the directory the device agent
+      # configures (IRONFLOCK_ENV_DIR), by name.
+      - path: ^internal/env/env\.go$
+        linters: [gosec]
+        text: G304
 
 formatters:
   enable:

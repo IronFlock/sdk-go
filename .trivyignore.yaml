@@ -1,0 +1,8 @@
+# Accepted trivy findings (image, configuration, licences).
+# Every entry needs a `statement` with the reason and an `expired_at` date at
+# most 12 months ahead; the security summary lists entries that expire within
+# 30 days. Prefer security/vex.openvex.json for "not affected" vulnerabilities.
+vulnerabilities: []
+misconfigurations: []
+secrets: []
+licenses: []

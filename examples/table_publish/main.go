@@ -46,8 +46,8 @@ func main() {
 		for i := range 10 {
 			batch = append(batch, Reading{
 				Tsp:         time.Now().Add(time.Duration(i) * time.Second),
-				Temperature: 20 + rand.Float64()*5,
-				Humidity:    50 + rand.Float64()*10,
+				Temperature: 20 + rand.Float64()*5,  //nolint:gosec // G404: made-up demo readings
+				Humidity:    50 + rand.Float64()*10, //nolint:gosec // G404: made-up demo readings
 			})
 		}
 		if err := ifl.PublishRowsToTable(ctx, "sensordata", batch); err != nil {

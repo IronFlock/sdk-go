@@ -955,7 +955,7 @@ func (c *Connection) UnsubscribeTopic(ctx context.Context, topic string) error {
 // returns ctx.Err(); what, the operation, names a failure in the log then.
 func (c *Connection) untrack(ctx context.Context, what string, finish func() error) error {
 	if err := c.state.lock(ctx); err != nil {
-		go func() {
+		go func() { //nolint:gosec // G118: finishes after the caller's context ended, by design (see above)
 			_ = c.state.lock(context.Background()) // never fails
 			defer c.state.unlock()
 			if err := finish(); err != nil {

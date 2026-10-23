@@ -501,12 +501,12 @@ func replaceFile(dst string, fi os.FileInfo, fill func(w io.Writer) error) (err 
 // copyFile overwrites the existing file dst, in place, with the content of
 // the file src.
 func copyFile(dst, src string) error {
-	in, err := os.Open(src)
+	in, err := os.Open(src) //nolint:gosec // G304: the caller's own file
 	if err != nil {
 		return err
 	}
 	defer closeQuietly(in)
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0)
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0) //nolint:gosec // G304: the caller's own file
 	if err != nil {
 		return err
 	}
@@ -524,7 +524,7 @@ func copyFile(dst, src string) error {
 // open(path, "wb") does, following symbolic links: for targets a rename
 // cannot replace, such as a FIFO or a device.
 func writeInPlace(path string, fill func(w io.Writer) error) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666) //nolint:gosec // G304: the caller's own file
 	if err != nil {
 		return err
 	}
@@ -543,7 +543,7 @@ func writeInPlace(path string, fill func(w io.Writer) error) error {
 func createTemp(dir, base string, perm os.FileMode) (*os.File, error) {
 	prefix := "." + truncateBytes(base, stagingBaseMax) + "."
 	for range 100 {
-		name := filepath.Join(dir, prefix+strconv.FormatUint(rand.Uint64(), 36)+".tmp")
+		name := filepath.Join(dir, prefix+strconv.FormatUint(rand.Uint64(), 36)+".tmp") //nolint:gosec // G404: a unique staging name, not a secret
 		f, err := openStaging(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm)
 		if errors.Is(err, os.ErrExist) {
 			continue

@@ -1,0 +1,25 @@
+# gitleaks: the default rules plus reviewed exceptions for this repository.
+# Each allowlist names the files AND the rule it covers, with the reason.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Recorded contract tables of the integration harness (reviewed 2026-10-24): the verdicts the real services gave for the fake platform's fixture identities. Their authids are the demo device serial, their secrets are derived from fake_auth.APP_CRED_KEY."
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)integration/contracts/[a-z_]+\.json$''']
+
+[[allowlists]]
+description = "The fake platform's app credential key and its copy in the contract generator (reviewed 2026-10-24): a fixture for the demo device, not a key of any real device."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)integration/fake_auth\.py$''', '''(^|/)integration/contracts/gen/userapp\.py$''']
+regexTarget = "line"
+regexes = ['''(^|\s)(APP_CRED_KEY|KEY) = "[A-Za-z0-9+/=_-]{40,48}"''']
+
+[[allowlists]]
+description = "The harness router's static credentials for the demo device: the legacy serial credential and the per-app credential derived from fake_auth.APP_CRED_KEY (reviewed 2026-10-24)."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)integration/router/config\.template\.yaml$''']
+regexTarget = "line"
+regexes = ['''\{ authid: "(app-26-dev-e1@)?06a0bf96-a539-4d6a-8471-ac7adc67616e", role: app, secret: "[^"]+" \}''']

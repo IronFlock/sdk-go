@@ -1,39 +1,35 @@
-name: CI
+name: ci
 
 on:
+  pull_request:
   push:
     branches: [main]
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-      - name: Vet
-        run: go vet ./...
-      - name: Unit tests
-        run: go test -race -count=1 ./...
-      - name: Cross-build (devices are often 32-bit ARM)
-        run: |
-          for target in linux/arm linux/arm64 linux/386 windows/amd64 darwin/arm64; do
-            GOOS=${target%/*} GOARCH=${target#*/} go build ./...
-          done
-      - name: go.mod and go.sum are tidy
-        run: go mod tidy -diff
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.14.0
-          # Build golangci-lint with go.mod's toolchain (set up above): the
-          # prebuilt binaries are built with go1.26 and cannot load Go 1.27 code.
-          install-mode: goinstall
+  # Lint (gofmt, tidy, vet, golangci-lint with gosec), unit tests under race +
+  # shuffle, and cross-builds for the device platforms, from the shared
+  # IronFlock CI harness.
+  gate:
+    uses: IronFlock/workflows/.github/workflows/go-gate.yml@v1
+    with:
+      # IronFlock devices are often 32-bit ARM.
+      targets: |
+        linux/arm
+        linux/arm64
+        linux/386
+        windows/amd64
+        darwin/arm64
+
+  workflows:
+    uses: IronFlock/workflows/.github/workflows/workflows-lint.yml@v1
 
   harness:
     # The integration harness without a router (integration/README.md): the
@@ -46,8 +42,10 @@ jobs:
       matrix:
         python: ["3.11", "3.14"]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - name: Fake platform against the contract tables
@@ -97,24 +95,26 @@ jobs:
       PYTHON: python
       IRONFLOCK_TEST_PLATFORM_URL: ws://localhost:18082/ws-ua-usr
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
       - name: Install the Python SDK (reference SDK and fake platform)
         # PyYAML lets start.sh verify the copied production roles.
         run: python -m pip install ironflock==1.9.1 pyyaml==6.0.3
       - id: gcp
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ vars.ROUTER_PULL_WIF_PROVIDER }}
           service_account: ${{ vars.ROUTER_PULL_SERVICE_ACCOUNT }}
           token_format: access_token
           create_credentials_file: false
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: europe-docker.pkg.dev
           username: oauth2accesstoken
@@ -156,3 +156,22 @@ jobs:
             f="integration/router/.run/$log.log"
             if [ -f "$f" ]; then echo "::group::$log.log"; tail -n 300 "$f"; echo "::endgroup::"; fi
           done
+
+  # The required check of the main-branch ruleset: green only when every job
+  # above succeeded. integration may be skipped (no router-pull identity
+  # configured, or a pull request from a fork); anything else skipped or
+  # cancelled counts as failed.
+  ci-ok:
+    if: ${{ always() }}
+    needs: [gate, workflows, harness, integration]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: all ci jobs succeeded
+        env:
+          REQUIRED: ${{ needs.gate.result }} ${{ needs.workflows.result }} ${{ needs.harness.result }}
+          INTEGRATION: ${{ needs.integration.result }}
+        run: |
+          echo "required: $REQUIRED, integration: $INTEGRATION"
+          for r in $REQUIRED; do [ "$r" = success ] || exit 1; done
+          case "$INTEGRATION" in success|skipped) ;; *) exit 1 ;; esac

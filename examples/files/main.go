@@ -43,7 +43,7 @@ func main() {
 			if err != nil {
 				return err
 			}
-			log.Printf("uploaded %s (%d bytes)", upload.Key, upload.Size)
+			log.Printf("uploaded %s (%d bytes)", upload.Key, upload.Size) //nolint:gosec // G706: example output of the SDK's own values
 		}
 
 		data, err := files.Get(ctx, "inspections/part-1.txt")

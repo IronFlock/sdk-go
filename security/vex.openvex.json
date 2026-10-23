@@ -1,0 +1,8 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/IronFlock/sdk-go/security/vex.openvex.json",
+  "author": "IronFlock",
+  "timestamp": "2026-10-23T00:00:00Z",
+  "version": 1,
+  "statements": []
+}
