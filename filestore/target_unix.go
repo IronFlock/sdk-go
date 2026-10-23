@@ -29,7 +29,7 @@ func prepareTarget(path string) (string, error) {
 	}
 	if dir == "" {
 		dir = "."
-	} else if err := os.MkdirAll(dir, 0o777); err != nil {
+	} else if err := os.MkdirAll(dir, 0o777); err != nil { //nolint:gosec // G301: the caller's download directory, created like mkdir -p (umask applies)
 		// MkdirAll takes dir as given, without cleaning it: the system
 		// applies each ".." after the links before it.
 		return "", err

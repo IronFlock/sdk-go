@@ -3,17 +3,56 @@
 # Platforms the SDK must build for (IronFlock devices are often 32-bit ARM).
 targets := "linux/arm linux/arm64 linux/386 windows/amd64 darwin/arm64"
 harness := "integration/router"
+# Pinned linters and scanners, the same versions as the IronFlock CI harness.
+golangci_lint_version := "v2.15.0"
+govulncheck_version := "v1.9.0"
+cyclonedx_gomod_version := "v1.12.0"
 
-# Run unit tests with the race detector
+# Unit tests as CI runs them: race detector, shuffled order, no cache.
 test:
-	go test -race -count=1 ./...
+	go test -race -shuffle=on -count=1 ./...
 
-# Vet, lint, cross-build for the device platforms, and check that go.mod/go.sum are tidy
-check:
-	go vet ./...
-	golangci-lint run ./...
-	for target in {{targets}}; do GOOS=${target%/*} GOARCH=${target#*/} go build ./... || exit 1; done
+# Lint as CI runs it (non-mutating): gofmt, go.mod tidiness, vet, build,
+# golangci-lint (.golangci.yml, gosec included).
+lint:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	echo "==> gofmt"
+	unformatted=$(gofmt -l $(git ls-files '*.go'))
+	if [ -n "$unformatted" ]; then echo "unformatted (run: gofmt -w):"; echo "$unformatted"; exit 1; fi
+	echo "==> go mod tidy (diff)"
 	go mod tidy -diff
+	echo "==> go vet"
+	go vet -tags integration ./...
+	echo "==> go build"
+	go build ./...
+	echo "==> golangci-lint"
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{golangci_lint_version}} run ./...
+	echo "==> lint OK"
+
+# Lint, then cross-build for the device platforms (CI: the gate's build jobs)
+check: lint
+	for target in {{targets}}; do GOOS=${target%/*} GOARCH=${target#*/} go build ./... || exit 1; done
+
+# govulncheck as SARIF for CI (security.yml `sarif-recipe`). Duplicate
+# result.stacks are removed (Code Scanning rejects them).
+sarif:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	mkdir -p build/sarif
+	go run golang.org/x/vuln/cmd/govulncheck@{{govulncheck_version}} -format sarif ./... > build/sarif/govulncheck.sarif
+	jq '.runs |= map(.results |= map(if .stacks then .stacks |= unique else . end))' build/sarif/govulncheck.sarif > build/sarif/govulncheck.sarif.tmp
+	mv build/sarif/govulncheck.sarif.tmp build/sarif/govulncheck.sarif
+	echo "SARIF written to build/sarif/"
+
+# CycloneDX SBOM of the Go module graph (security.yml `sbom-recipe`).
+sbom:
+	#!/usr/bin/env bash
+	set -euo pipefail
+	mkdir -p build/sbom
+	go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@{{cyclonedx_gomod_version}} \
+		mod -licenses -json -output build/sbom/sdk-go.cdx.json .
+	echo "SBOM written to build/sbom/"
 
 # Unit test coverage report
 coverage:

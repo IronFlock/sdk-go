@@ -815,7 +815,7 @@ func (s *FileStore) PutReader(ctx context.Context, key string, r io.Reader, size
 // path must name a regular file (use PutReader for pipes and other
 // streams); its size is taken when it is opened.
 func (s *FileStore) PutFile(ctx context.Context, key, path string, opts ...Option) (*ObjectInfo, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) //nolint:gosec // G304: the caller's own file
 	if err != nil {
 		return nil, err
 	}

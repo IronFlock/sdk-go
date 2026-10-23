@@ -159,12 +159,12 @@ const (
 	// URISecretColumn: a read (GetHistory, GetSeriesHistory, RevealSecrets,
 	// VerifySecret) that filters on a secret column, whose stored values no
 	// predicate can match. Use VerifySecret to test a value.
-	URISecretColumn = "sys.dataservice.error.secret_column"
+	URISecretColumn = "sys.dataservice.error.secret_column" //nolint:gosec // G101: an error URI, not a credential
 	// URINotASecretColumn: VerifySecret with a column that is not one of the
 	// table's secret columns. (A table without secret columns has no
 	// secret.reveal or secret.verify procedure: those calls fail as not
 	// registered.)
-	URINotASecretColumn = "sys.dataservice.error.not_a_secret_column"
+	URINotASecretColumn = "sys.dataservice.error.not_a_secret_column" //nolint:gosec // G101: an error URI, not a credential
 	// URIStorageFull: a table write refused because the appliance's disk is
 	// nearly full (below about 3 GiB free; writes are accepted again from
 	// 4 GiB). Temporary, nothing stored is lost: hold the rows and append
@@ -181,10 +181,10 @@ const (
 	// URISecretSentinelUnresolvable: a write that keeps a secret column's
 	// previous value (it sends SecretPlaceholder) to a table without an entity
 	// key to find that value by, or without that key in the row.
-	URISecretSentinelUnresolvable = "sys.dataservice.error.secret_sentinel_unresolvable"
+	URISecretSentinelUnresolvable = "sys.dataservice.error.secret_sentinel_unresolvable" //nolint:gosec // G101: an error URI, not a credential
 	// URISecretCiphertextRejected: a write of a value that is already
 	// encrypted (read back raw, say) to a secret column: send the plaintext.
-	URISecretCiphertextRejected = "sys.dataservice.error.secret_ciphertext_rejected"
+	URISecretCiphertextRejected = "sys.dataservice.error.secret_ciphertext_rejected" //nolint:gosec // G101: an error URI, not a credential
 )
 
 // operationFailed wraps err for operation op, leaving client-side errors
