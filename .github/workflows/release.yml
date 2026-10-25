@@ -1,7 +1,8 @@
 # Release: the merge of a release pull request (`just release-patch`: version
 # bump, title `release sdk-go v<version>`) sets the tag v<version> — for a Go
-# module the tag is the release — then creates the GitHub release and checks
-# that the Go module proxy serves the version. Main accepts only pull requests
+# module the tag is the release — and its GitHub release (both with the
+# release GitHub App's token), then checks that the Go module proxy serves the
+# version. Main accepts only pull requests
 # whose required checks (ci-ok, security / report) passed, so every release
 # comes from a merged, fully green commit; nothing is tagged from a laptop.
 # A no-release merge starts nothing: `paths` holds only the version file, and
@@ -35,14 +36,15 @@ jobs:
     secrets: inherit # zizmor: ignore[secrets-inherit]
     with:
       version-file: VERSION
+      # The GitHub release of the tag, with the same App token.
+      github-release: true
 
-  publish:
+  proxy:
     needs: [tag]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      # gh release create
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -51,11 +53,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: GitHub release ${{ needs.tag.outputs.tag }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.tag.outputs.tag }}
-        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
       - name: the Go module proxy serves ${{ needs.tag.outputs.tag }}
         env:
           TAG: ${{ needs.tag.outputs.tag }}
