@@ -140,108 +140,43 @@ test-integration: test-harness
 		go test -tags integration -race -count=1 -v ./integration/...
 
 # ------------------------------------------------------------------ release --
-#   just release-patch = _require-clean -> bump-patch -> _release-pr -> _publish
-#
-# _release-pr opens a pull request with the version bump, GitHub merges it once
-# ci-ok and security / report are green, and the merged commit is tagged
-# v<version>: that tag is the Go module release. _publish creates the GitHub
-# release and checks that the Go module proxy serves the version. Every step
-# runs as its own `just` process, so each reads the bumped VERSION.
+# Pull requests into main, from IronFlock/workflows (scripts/pr.sh at v1):
+#   just merge [TITLE]   a no-release pull request from this feature branch
+#   just release-patch   a release pull request (-minor): the bump from main's
+#                        VERSION on top of this branch (or on a new branch
+#                        release/v<x> from an up-to-date main). Its merge runs
+#                        .github/workflows/release.yml: the tag v<version> (the
+#                        module release), the GitHub release, the proxy check.
+# Both merge automatically once ci and security are green. A major version
+# needs the module path /v2 (go.mod and every import): not a bump.
+RELEASE_NAME := "sdk-go"
+VERSION_FILE := "VERSION"
+VERSION_FILES := "VERSION"
 
-# Releases come off a clean tree: the release commit carries the version bump
-# and nothing else.
-_require-clean:
+# Writes the version; called by pr.sh with the next version.
+_write-version version:
+	printf '%s\n' "{{version}}" > {{VERSION_FILE}}
+
+[positional-arguments]
+_pr *args:
 	#!/usr/bin/env bash
 	set -euo pipefail
-	dirty=$(git status --porcelain 2>/dev/null || true)
-	if [ -n "$dirty" ]; then
-		echo "release: uncommitted changes here — commit them first." >&2
-		printf '%s\n' "$dirty" >&2
-		exit 1
-	fi
+	script=$(mktemp)
+	trap 'rm -f "$script"' EXIT
+	gh api -H 'Accept: application/vnd.github.raw' \
+		'repos/IronFlock/workflows/contents/scripts/pr.sh?ref=v1' > "$script"
+	bash "$script" "$@"
 
-bump-patch:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	IFS=. read -r major minor patch <<< "{{version}}"
-	printf '%s.%s.%s\n' "$major" "$minor" "$((patch + 1))" > VERSION
-	echo "version is now $(cat VERSION)"
-
-bump-minor:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	IFS=. read -r major minor patch <<< "{{version}}"
-	printf '%s.%s.%s\n' "$major" "$((minor + 1))" 0 > VERSION
-	echo "version is now $(cat VERSION)"
-
-bump-major:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	echo "a major version needs the module path /v2 (go.mod and every import): not a bump" >&2
-	exit 1
-
-# Version bump through a pull request (main is protected): branch, commit only
-# VERSION, open the PR, merge it automatically once the required checks pass,
-# then tag the merged commit on main and push the tag.
-_release-pr:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	tag="v{{version}}"
-	branch="release/${tag}"
-	title="release sdk-go ${tag}"
-	git fetch --quiet origin main
-	if [ "$(git rev-parse --abbrev-ref HEAD)" != main ] || [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-		echo "release: run from an up-to-date main (git switch main && git pull --ff-only)" >&2
-		git checkout -- VERSION
-		exit 1
-	fi
-	git switch -c "$branch"
-	git add -- VERSION
-	git commit -m "$title"
-	git push -u origin "$branch"
-	gh pr create --base main --head "$branch" --title "$title" \
-		--body "Version bump only, opened by \`just release-${RELEASE_KIND:-patch}\`. Merged automatically once the required checks pass; the tag on the merged commit is the module release."
-	gh pr merge "$branch" --squash --auto --delete-branch
-	echo "==> waiting for the required checks and the merge of ${branch}"
-	sha=""
-	for _ in $(seq 1 120); do
-		read -r state sha <<<"$(gh pr view "$branch" --json state,mergeCommit --jq '"\(.state) \(.mergeCommit.oid // "")"')"
-		case "$state" in
-			MERGED) break ;;
-			CLOSED) echo "release PR ${branch} was closed without merging" >&2; exit 1 ;;
-		esac
-		sleep 20
-	done
-	[ "${state:-}" = MERGED ] && [ -n "$sha" ] || { echo "release PR ${branch} not merged after 40 min: gh pr checks ${branch}" >&2; exit 1; }
-	git switch main
-	git pull --ff-only
-	git branch -D "$branch" 2>/dev/null || true
-	git tag -a "$tag" -m "$title" "$sha"
-	git push origin "$tag"
-	echo "==> tagged ${tag} on ${sha}"
-
-# GitHub release for the tag, then the module proxy must serve the version.
-_publish:
-	#!/usr/bin/env bash
-	set -euo pipefail
-	tag="v$(tr -d '[:space:]' < VERSION)"
-	gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --verify-tag --title "$tag" --generate-notes
-	for _ in $(seq 1 20); do
-		got=$(GOPROXY=https://proxy.golang.org GOFLAGS=-mod=mod go list -m -f '{{{{.Version}}' "{{module}}@${tag}" 2>/dev/null || true)
-		[ "$got" = "$tag" ] && { echo "==> {{module}}@${tag} on proxy.golang.org"; exit 0; }
-		sleep 15
-	done
-	echo "proxy.golang.org does not serve {{module}}@${tag} yet" >&2
-	exit 1
+[positional-arguments]
+merge TITLE="":
+	just _pr merge {{VERSION_FILE}} "$1"
 
 release-patch:
-	just _require-clean
-	just bump-patch
-	just _release-pr
-	just _publish
+	just _pr release patch {{RELEASE_NAME}} {{VERSION_FILE}} release.yml {{VERSION_FILES}}
 
 release-minor:
-	just _require-clean
-	just bump-minor
-	RELEASE_KIND=minor just _release-pr
-	just _publish
+	just _pr release minor {{RELEASE_NAME}} {{VERSION_FILE}} release.yml {{VERSION_FILES}}
+
+release-major:
+	@echo "a major version needs the module path /v2 (go.mod and every import): not a bump" >&2; exit 1
+
