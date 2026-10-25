@@ -1,0 +1,70 @@
+# Release: the merge of a release pull request (`just release-patch`: version
+# bump, title `release sdk-go v<version>`) sets the tag v<version> — for a Go
+# module the tag is the release — then creates the GitHub release and checks
+# that the Go module proxy serves the version. Main accepts only pull requests
+# whose required checks (ci-ok, security / report) passed, so every release
+# comes from a merged, fully green commit; nothing is tagged from a laptop.
+# A no-release merge starts nothing: `paths` holds only the version file, and
+# when a no-release pull request touches it anyway the jobs below are skipped
+# by its merge title. A re-run is safe (the tag and the release are kept).
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Written with the release GitHub App's token from the `release` environment
+  # (deployments from main only).
+  tag:
+    if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release ')
+    uses: IronFlock/workflows/.github/workflows/release-tag.yml@v1
+    permissions:
+      contents: read
+    # The App key is a secret of the `release` environment; environment
+    # secrets reach a reusable workflow only through `secrets: inherit`.
+    secrets: inherit # zizmor: ignore[secrets-inherit]
+    with:
+      version-file: VERSION
+
+  publish:
+    needs: [tag]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # gh release create
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: GitHub release ${{ needs.tag.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.tag.outputs.tag }}
+        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+      - name: the Go module proxy serves ${{ needs.tag.outputs.tag }}
+        env:
+          TAG: ${{ needs.tag.outputs.tag }}
+          MODULE: github.com/ironflock/sdk-go
+        run: |
+          for _ in $(seq 1 40); do
+            got=$(GOPROXY=https://proxy.golang.org GOFLAGS=-mod=mod go list -m -f '{{.Version}}' "$MODULE@$TAG" 2>/dev/null || true)
+            if [ "$got" = "$TAG" ]; then echo "$MODULE@$TAG on proxy.golang.org"; exit 0; fi
+            sleep 15
+          done
+          echo "::error::proxy.golang.org does not serve $MODULE@$TAG after 10 minutes"
+          exit 1
