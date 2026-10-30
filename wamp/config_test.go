@@ -12,7 +12,7 @@ import (
 	"github.com/ironflock/sdk-go/internal/env"
 )
 
-// The device agent writes /data/env readable by root only. An app container
+// Older device agents write /data/env readable by root only. An app container
 // running as another user cannot read the per-app credential there: it gets
 // the start-time environment, and the process says so once (finding 28 of
 // the round-3 review).

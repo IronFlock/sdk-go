@@ -159,8 +159,8 @@ at once: the app's realm could never be joined.
 
 Only the per-app credential and the remote-access ports are read live, from `/data/env` (or the directory
 `IRONFLOCK_ENV_DIR` names); every other value comes from the environment the app started with. The agent keeps
-`/data/env` up to date while the app runs, but makes it readable by root only. In a container that runs as
-another user the SDK sees the values the container started with — no rotated credential, no changed
+`/data/env` up to date while the app runs. Older agents make it readable by root only: in a container there that
+runs as another user the SDK sees the values the container started with — no rotated credential, no changed
 remote-access port — and logs a warning once.
 
 ## API Reference

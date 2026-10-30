@@ -49,9 +49,9 @@ func ReadInjected(name string) string {
 // read: err is then the read error (permission denied, typically), and value
 // the environment variable. A missing file is not an error.
 //
-// The agent writes /data/env readable by root only (a 0700 directory of
-// 0600 files), so an app container that runs as another user cannot read
-// it and sees only the values it started with.
+// Older agents write /data/env readable by root only (a 0700 directory of
+// 0600 files), so an app container there that runs as another user cannot
+// read it and sees only the values it started with.
 func Lookup(name string) (value string, err error) {
 	value, ok, err := readFile(name)
 	if ok && value != "" {
@@ -123,9 +123,9 @@ func WarnUnreadable(log *slog.Logger, err error) {
 	dir := Dir()
 	log.Warn(fmt.Sprintf("Cannot read the values the IronFlock device agent keeps up to date in %s (%v); "+
 		"using the environment the container started with instead. Values the agent changes while the app "+
-		"runs (a rotated app credential, an instance's cloud tunnel ports) will not reach this app. The agent "+
-		"makes %s readable by root only: run the app's container as root, or give it read access to %s.",
-		dir, err, dir, dir))
+		"runs (a rotated app credential, an instance's cloud tunnel ports) will not reach this app. Older agents "+
+		"make %s readable by root only: update the device agent, or run the app's container as root.",
+		dir, err, dir))
 }
 
 // ResetWarning makes the next WarnUnreadable log again. For tests.
