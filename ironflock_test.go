@@ -1078,9 +1078,9 @@ func TestStopClosesTheFileStoresIdleConnections(t *testing.T) {
 }
 
 // The connection reads the per-app credential from the device agent's
-// /data/env mirror on every attempt, and the agent makes it readable by root
-// only: in a container that runs as another user Start says so, once, on the
-// app's logger.
+// /data/env mirror on every attempt, and older agents make it readable by
+// root only: in a container there that runs as another user Start says so,
+// once, on the app's logger.
 func TestStartWarnsWhenTheCredentialMirrorIsUnreadable(t *testing.T) {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 		t.Skip("file permissions do not apply to this process")

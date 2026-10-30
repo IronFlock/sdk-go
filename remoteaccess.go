@@ -58,8 +58,8 @@ const maxDNSLabelLength = 63
 // app on the device's LAN address instead. tcp/udp return false there, as
 // the agent announces no remote port to a DEV container.
 //
-// The values come from /data/env, which the agent makes readable by root
-// only: in a container running as another user they are the values the
+// The values come from /data/env, which older agents make readable by root
+// only: in a container there running as another user they are the values the
 // container started with, and the SDK logs a warning once.
 func (f *IronFlock) GetRemoteAccessURLForPort(port int, protocol, remotePortEnvironment string) (string, bool) {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))

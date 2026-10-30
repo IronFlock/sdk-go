@@ -138,7 +138,7 @@ func SerialNumber(serialNumber string) (string, error) {
 // per-app credential was injected. Legacy credentials still authenticate the
 // app on its own realm; cross-app access requires the per-app pair.
 //
-// A /data/env file that exists but cannot be read — the agent makes the
+// A /data/env file that exists but cannot be read — older agents make the
 // directory readable by root only, so an app container running as another
 // user cannot read it — falls back to the environment variable, the value
 // the container started with. The first such failure in the process is

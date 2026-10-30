@@ -66,7 +66,7 @@ func TestLookup(t *testing.T) {
 	}
 }
 
-// A mirror the app cannot read — the agent writes it readable by root only —
+// A mirror the app cannot read — older agents write it readable by root only —
 // is reported, and the start-time environment is used.
 func TestLookupReportsAnUnreadableMirror(t *testing.T) {
 	skipUnlessPermissionsApply(t)
