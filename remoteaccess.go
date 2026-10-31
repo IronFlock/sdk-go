@@ -52,11 +52,12 @@ const maxDNSLabelLength = 63
 // point at localhost: such an appliance serves app ports on its host ports,
 // which a tunnel URL cannot express.
 //
-// The agent tunnels the ports of PROD installs only. In a DEV container the
-// http(s) URL is the one of the PROD install of the same app on this device
-// (the label has no stage), which never reaches this container; reach a DEV
-// app on the device's LAN address instead. tcp/udp return false there, as
-// the agent announces no remote port to a DEV container.
+// In a DEV container the http(s) URL is the one of the PROD install of the
+// same app on this device (the label has no stage), not the development run's
+// own tunnel, which the IDE's side menu opens. A tcp/udp URL is the
+// development run's own: its tunnel comes up after the container started, and
+// the agent announces its remote port in /data/env only while it is up, so the
+// result is false until then.
 //
 // The values come from /data/env, which older agents make readable by root
 // only: in a container there running as another user they are the values the

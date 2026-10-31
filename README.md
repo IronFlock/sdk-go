@@ -579,8 +579,8 @@ instead — the template's own `remote_port_environment`, which older agents nee
 internet-facing port, the variable's `_CLOUD` companion, is preferred while the agent announces it; once it is
 gone (cloud forwarding turned off), the instance-local URL is returned again.
 
-The agent tunnels the ports of PROD installs only: in a DEV container the http(s) URL is that of the PROD
-install of the same app, and tcp/udp give none. On an appliance installed without a domain (plain mode) the
+In a DEV container the http(s) URL is that of the PROD install of the same app, not the development run's
+own tunnel; a tcp/udp URL is the development run's own, once its tunnel is up. On an appliance installed without a domain (plain mode) the
 agent sets the tunnel domain to `localhost`. The platform does not set `CLOUD_TUNNEL_DOMAIN`: an instance's
 URLs use `app.ironflock.com` unless the app sets that variable itself.
 
