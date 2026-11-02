@@ -82,6 +82,7 @@ async def main():
     await step("get_series_history", lambda: ifl.get_series_history("sensordata", {
         "metrics": [{"ref": "temperature", "method": "AVG"}], "limit": 100,
         "timeRange": ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"], "groupBy": ["device_key"]}))
+    await step("refresh_transform", lambda: ifl.refresh_transform("sensordata_hourly"))
     await step("reveal_secrets", lambda: ifl.reveal_secrets("credentials", {"limit": 1, "filterAnd": [{"latest": True}]}))
     await step("verify_secret_match", lambda: ifl.verify_secret("credentials", "api_key", "right"))
     await step("verify_secret_limit", lambda: ifl.verify_secret("credentials", "api_key", "wrong", {"limit": 3}))

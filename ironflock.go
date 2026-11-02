@@ -167,9 +167,10 @@ func WithCredentials(authID, secret string) Option {
 
 // WithReconnectWindow sets how long a table call (PublishToTable,
 // AppendToTable, PublishRowsToTable, AppendRowsToTable, ReportError,
-// GetHistory, GetSeriesHistory, RevealSecrets, VerifySecret, a consumed
-// app's history reads, and the read that catches a table subscription up
-// after a reconnect) rides out a platform restart before it fails: it waits
+// GetHistory, GetSeriesHistory, RevealSecrets, VerifySecret,
+// RefreshTransform, a consumed app's history reads, and the read that
+// catches a table subscription up after a reconnect) rides out a platform
+// restart before it fails: it waits
 // that long for the connection to come back and for the platform to serve
 // the app's tables again. The table publishes are such calls: they append,
 // so a row written while the data backend restarts is not lost. Publish,

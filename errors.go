@@ -165,10 +165,11 @@ const (
 	// secret.reveal or secret.verify procedure: those calls fail as not
 	// registered.)
 	URINotASecretColumn = "sys.dataservice.error.not_a_secret_column" //nolint:gosec // G101: an error URI, not a credential
-	// URIStorageFull: a table write refused because the appliance's disk is
-	// nearly full (below about 3 GiB free; writes are accepted again from
-	// 4 GiB). Temporary, nothing stored is lost: hold the rows and append
-	// them later.
+	// URIStorageFull: a table write, or a transform refresh
+	// (RefreshTransform), refused because the appliance's disk is nearly
+	// full (below about 3 GiB free; writes are accepted again from 4 GiB).
+	// Temporary, nothing stored is lost: hold the rows and append them
+	// later, refresh later.
 	URIStorageFull = "sys.dataservice.error.storage_full"
 	// URIStorageOverusage: a table write refused because the account's storage
 	// allowance is used up; retrying soon does not help.
@@ -185,6 +186,15 @@ const (
 	// URISecretCiphertextRejected: a write of a value that is already
 	// encrypted (read back raw, say) to a secret column: send the plaintext.
 	URISecretCiphertextRejected = "sys.dataservice.error.secret_ciphertext_rejected" //nolint:gosec // G101: an error URI, not a credential
+	// URIRefreshInProgress: RefreshTransform while the materialized view is
+	// held by a refresh the data backend runs outside the on-demand queue
+	// (the first refresh after a setup, say). Nothing changed: call again
+	// later.
+	URIRefreshInProgress = "sys.dataservice.error.refresh_in_progress"
+	// URIRefreshFailed: RefreshTransform whose REFRESH MATERIALIZED VIEW, or
+	// the read of the view after it, the database refused. The database's
+	// reason is the first argument (and in the app's error log).
+	URIRefreshFailed = "sys.dataservice.error.refresh_failed"
 )
 
 // operationFailed wraps err for operation op, leaving client-side errors
@@ -218,9 +228,21 @@ const secretRPCHint = "The data backend registers it only for a table that decla
 	"the table declares no secret column (mark one `secret: true` in the app's data-template), " +
 	"the table is not declared in the data-template, or the app's data backend predates secret columns (update it)."
 
+// transformRefreshHint replaces historyHint for transform.refresh.<transform>
+// (RefreshTransform). The data backend registers it only for a transform
+// declared in the data-template, so a name that is a table's, not a
+// transform's, is the first cause it names; then a data backend that is not
+// running, and last one older than on-demand transform refresh. The Python
+// and JavaScript SDKs use the same text.
+const transformRefreshHint = "The data backend registers it only for a transform declared in the app's data-template: " +
+	"the name is not a transform's `tablename` (a table has no refresh procedure; check `transforms:` in data-template.yml), " +
+	"the app's data backend is not running, or it predates on-demand transform refresh (update it)."
+
 // historyFailed wraps a failed history-style RPC, spelling out the
-// not-registered case. secret selects the secret-column hint.
-func historyFailed(op, topic string, err error, secret bool) error {
+// not-registered case. A non-empty hint (secretRPCHint, transformRefreshHint)
+// explains that case for the procedure; "" keeps the history reads' wording
+// and historyHint.
+func historyFailed(op, topic string, err error, hint string) error {
 	if err == nil {
 		return nil
 	}
@@ -232,9 +254,9 @@ func historyFailed(op, topic string, err error, secret bool) error {
 		strings.Contains(text, "no_such_procedure") ||
 		strings.Contains(text, "no callee registered")
 	if notRegistered {
-		if secret {
+		if hint != "" {
 			return &OperationError{Op: op, Err: err,
-				hint: fmt.Sprintf("procedure '%s' is not registered. %s", topic, secretRPCHint)}
+				hint: fmt.Sprintf("procedure '%s' is not registered. %s", topic, hint)}
 		}
 		return &OperationError{Op: op, Err: err,
 			hint: fmt.Sprintf("history procedure '%s' is not registered. %s", topic, historyHint)}

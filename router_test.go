@@ -1234,6 +1234,47 @@ func TestATablePublishRidesOutABackendRestart(t *testing.T) {
 	}
 }
 
+// RefreshTransform is a table call: one issued while the data backend
+// registers transform.refresh again after a restart is retried within the
+// reconnect window, and its single argument reaches the callee as an empty
+// object, not null.
+func TestRefreshTransformRidesOutABackendRestart(t *testing.T) {
+	tr := newTestRouter(t, true)
+	f := startedRealFlock(t, tr)
+	calls := backendComingBack(t, tr, "transform.refresh.hourly_avg")
+	args := make(chan nxwamp.List, 1)
+	if err := tr.local(t).Register("transform.refresh.plain", func(_ context.Context, inv *nxwamp.Invocation) client.InvokeResult {
+		args <- inv.Arguments
+		return client.InvokeResult{Args: nxwamp.List{map[string]any{
+			"success": true, "materialized": false, "refreshed": false, "skipped": false, "published": true, "rows": 3}}}
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := f.RefreshTransform(timeout(t, 10*time.Second), "hourly_avg")
+	if err != nil {
+		t.Fatalf("RefreshTransform across a data backend restart: %v", err)
+	}
+	if !res.Success {
+		t.Errorf("result %#v, want Success", *res)
+	}
+	if n := calls.Load(); n != 3 {
+		t.Errorf("called transform.refresh.hourly_avg %d times, want 3", n)
+	}
+
+	res, err = f.RefreshTransform(timeout(t, 5*time.Second), "plain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (TransformRefreshResult{Success: true, Published: true, Rows: 3}); *res != want {
+		t.Errorf("result %#v, want %#v", *res, want)
+	}
+	got := recv(t, args, "the refresh arguments")
+	if len(got) != 1 || !reflect.DeepEqual(got[0], map[string]any{}) {
+		t.Errorf("arguments %#v, want one empty object", got)
+	}
+}
+
 // A refused table publish fails with an error that names the publish and,
 // for a refusal without a reason, points at the missing tsp. It is not
 // retried: the call reached the data backend.

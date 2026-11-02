@@ -294,6 +294,7 @@ func TestWhichOperationsUseTheReconnectWindow(t *testing.T) {
 			TimeRange: &TimeRange{Start: int64(0)}})
 		_, _ = f.RevealSecrets(bg, "t", nil)
 		_, _ = f.VerifySecret(bg, "t", "c", "x", nil)
+		_, _ = f.RefreshTransform(bg, "t")
 		if n := len(f.own.allPublishes()); n != 0 {
 			t.Errorf("%d table operations published", n)
 		}

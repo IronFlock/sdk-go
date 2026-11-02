@@ -247,8 +247,9 @@ Test hooks (procedures on `realm-2-26-dev`; the recordings never include them):
 Local deviations from production: static realm/role bindings instead of fleetdb's runtime binding; one test service
 role standing in for fleetdb and fleetfiles; one session per realm serving both; rows in memory, so a value Postgres
 would refuse fails with `wamp.error.runtime_error` and a short pg-like error object; timestamps parse as ISO 8601
-only; `LIKE` on numeric, timestamp and json values matches nothing; no continuous aggregates, cron transforms,
-alarms, subscriber gate or realtime size guard; no files on the provider realm; the catalog reports
+only; `LIKE` on numeric, timestamp and json values matches nothing; no continuous aggregates, cron schedule of
+transforms (the on-demand tick, `transform.refresh.<transform>`, always refreshes and always publishes), alarms,
+subscriber gate or realtime size guard; no files on the provider realm; the catalog reports
 `inline_max_bytes` 1024 instead of 6291456, so 5000-byte objects take the presigned path; the object store has no
 versions or multipart uploads; the identity callout answers only data-realm names (the device-agent, appliance and
 account families have no sessions here).

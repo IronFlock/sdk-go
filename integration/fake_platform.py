@@ -129,7 +129,8 @@ OWN_TEMPLATE = {
          "columns": [col("tsp", "timestamp"), col("seq", "bigint"), col("payload", "string")]},
     ],
     "transforms": [
-        {"tablename": "sensordata_hourly", "columns": [col("tsp", "timestamp"), col("avg_temperature", "numeric")],
+        {"tablename": "sensordata_hourly", "materialize": True,
+         "columns": [col("tsp", "timestamp"), col("avg_temperature", "numeric")],
          "x-rows": [{"tsp": 1767225600000, "avg_temperature": 21.5}, {"tsp": 1767229200000, "avg_temperature": 22.0},
                     {"tsp": 1767232800000, "avg_temperature": 22.5}]},
     ],
@@ -272,7 +273,16 @@ async def bind_backend(session, backend, kind):
                 record(kind, u, args, kwargs)
                 return wamp_errors(lambda: backend.call(u, list(args), kwargs, call_details(details)))
             return handler
-        await session.register(make(uri), uri, options=RegisterOptions(details_arg="details"))
+        try:
+            await session.register(make(uri), uri, options=RegisterOptions(details_arg="details"))
+        except ApplicationError as e:
+            # A router whose fleetdb role predates the transform.refresh.
+            # prefix refuses the registration; fleetdb warns and goes on
+            # (registerRefreshTransform), and so does the harness.
+            if not uri.startswith("transform.refresh."):
+                raise
+            print("fake platform: %s not registered (%s): the router predates on-demand refresh" % (uri, e.error),
+                  flush=True)
 
     for topic, _, _ in backend.write_topics():
         def on_event(*args, details=None, **kwargs):

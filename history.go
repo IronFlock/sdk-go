@@ -203,7 +203,7 @@ func (f *IronFlock) GetHistory(ctx context.Context, table string, q *TableQueryP
 	read := new(chunkedRead)
 	res, err := f.call(ctx, topic, []any{wire}, nil, read.options(), f.reconnectWindow)
 	if err != nil {
-		return nil, historyFailed(op, topic, err, false)
+		return nil, historyFailed(op, topic, err, "")
 	}
 	return read.rows(op, res)
 }
@@ -236,7 +236,7 @@ func (f *IronFlock) GetSeriesHistory(ctx context.Context, table string, q Series
 	read := new(chunkedRead)
 	res, err := f.call(ctx, topic, []any{wire}, nil, read.options(), f.reconnectWindow)
 	if err != nil {
-		return nil, historyFailed(op, topic, err, false)
+		return nil, historyFailed(op, topic, err, "")
 	}
 	return read.rows(op, res)
 }
@@ -271,7 +271,7 @@ func (f *IronFlock) RevealSecrets(ctx context.Context, table string, q *TableQue
 	read := new(chunkedRead)
 	res, err := f.call(ctx, topic, []any{wire}, nil, read.options(), f.reconnectWindow)
 	if err != nil {
-		return nil, historyFailed(op, topic, err, true)
+		return nil, historyFailed(op, topic, err, secretRPCHint)
 	}
 	return read.rows(op, res)
 }
@@ -312,7 +312,7 @@ func (f *IronFlock) VerifySecret(ctx context.Context, table, column, candidate s
 	topic := "secret.verify." + table
 	res, err := f.call(ctx, topic, []any{wire}, nil, nil, f.reconnectWindow)
 	if err != nil {
-		return nil, historyFailed(op, topic, err, true)
+		return nil, historyFailed(op, topic, err, secretRPCHint)
 	}
 	return verifyResult(res), nil
 }

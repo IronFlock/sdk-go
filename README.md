@@ -150,7 +150,7 @@ override it:
 | `WithURL(u)` | `DEVICE_ENDPOINT_URL` | Router WebSocket URL, e.g. `wss://cbw.ironflock.com/ws-ua-usr`. Without it the URL comes from `DEVICE_ENDPOINT_URL` (path replaced by `/ws-ua-usr`), then from the studio URL; with neither set it is `wss://cbw.ironflock.com/ws-ua-usr` |
 | `WithReswarmURL(u)` | `RESWARM_URL` | Studio URL used to look up the router of a known IronFlock deployment. When the router URL comes from it, an unknown studio URL makes `Start` fail (`cannot resolve WebSocket URI…`): for another deployment, set `DEVICE_ENDPOINT_URL` or use `WithURL` |
 | `WithCredentials(id, secret)` | `APP_AUTH_ID`, `APP_AUTH_SECRET` | WAMP-CRA credential. By default the per-app credential the agent injects is used (read from `/data/env` first, so a rotated credential is picked up on the next reconnect), falling back to the device serial number — the legacy credential, which [cross-app access](#cross-app-data-access) does not accept. `New` fails with `ErrInvalidArgument` when only one of the two is given |
-| `WithReconnectWindow(d)` | | How long a table operation waits for the connection — after a platform restart, or before `Start` — and retries while the data backend comes back, before it fails (default 60 s, `DefaultReconnectWindow`). The table writes (`PublishToTable` included: it appends) and the reads are such operations, and so is the catch-up read of a table subscription. `Publish`, `Subscribe`, `SubscribeToTable` and `RegisterDeviceFunction` wait as long for the connection, and are not retried. 0 turns the window off: these operations then behave exactly like all other operations — 10 s for the connection, before `Start` as well, and no retries. A negative `d` makes `New` fail with `ErrInvalidArgument`. See [Connection reliability](#connection-reliability) |
+| `WithReconnectWindow(d)` | | How long a table operation waits for the connection — after a platform restart, or before `Start` — and retries while the data backend comes back, before it fails (default 60 s, `DefaultReconnectWindow`). The table writes (`PublishToTable` included: it appends), the reads and `RefreshTransform` are such operations, and so is the catch-up read of a table subscription. `Publish`, `Subscribe`, `SubscribeToTable` and `RegisterDeviceFunction` wait as long for the connection, and are not retried. 0 turns the window off: these operations then behave exactly like all other operations — 10 s for the connection, before `Start` as well, and no retries. A negative `d` makes `New` fail with `ErrInvalidArgument`. See [Connection reliability](#connection-reliability) |
 | `WithLogger(l)` | | `*slog.Logger` for connection lifecycle logs (default `slog.Default()`) |
 
 Missing `DEVICE_KEY`, `APP_NAME`, `SWARM_KEY` or `APP_KEY` are logged as a warning; the operations that need
@@ -333,9 +333,10 @@ handler as an `Event` with `Topic` (`transformed.<table>`) and `Args` only (no `
 on the subscription's `DeliveryGroup` (the one in `SubscribeOptions.Group`, if set); a panic is recovered and
 logged while the catch-up goes on. Warnings go to the logger of `WithLogger`.
 
-A transform (a data template's SQL view) has no rows of its own: on every tick of its schedule the data
-backend publishes the whole view — at most 3000 rows — as one event. Read it with `ev.Rows()`; `ev.Row()` is
-nil for it. A transform needs no catch-up: its next tick after a reconnect publishes the whole view again.
+A transform (a data template's SQL view) has no rows of its own: on every tick of its schedule, and on
+`RefreshTransform`, the data backend publishes the whole view — at most 3000 rows — as one event. Read it with
+`ev.Rows()`; `ev.Row()` is nil for it. A transform needs no catch-up: its next tick after a reconnect (or a
+`RefreshTransform`) publishes the whole view again.
 
 ```go
 ts, err := ifl.SubscribeToTable(ctx, "sensordata", func(ev *ironflock.Event) {
@@ -408,7 +409,8 @@ one is refused (`URISecretColumn`).
 A transform (a data template's SQL view) applies `Limit`, `Offset` and `FilterAnd` only: it ignores
 `TimeRange`, `Columns`, `ColumnPaths` and `Latest()`, and drops a filter on a column the view does not declare
 (it has no implicit `tsp`, `device_key` or `authid`), which widens the result. Its rows come in the view's own
-order, reversed. Bound a transform's time range in its SQL.
+order, reversed. Bound a transform's time range in its SQL. A materialized transform (`materialize: true`) is
+read as of its last refresh — on its schedule and on `RefreshTransform`.
 
 `ironflock.DecodeRows[T](rows)` converts rows into a slice of your own struct type (decode `tsp` into an
 `int64`: it arrives as epoch milliseconds).
@@ -448,6 +450,62 @@ holds more than `Limit` of them — and an open end reaches up to the data backe
 allow a bucket more. `FilterAnd` takes predicates and groups; the `Latest()` marker is not supported here. The
 data backend refuses what it cannot answer with `URIInvalidTimeRange`, `URIInvalidMetric`, `URIInvalidGroupBy`
 and `URISeriesTooManyGroups` (more than 50,000 rows).
+
+### `RefreshTransform(ctx, transform string) (*TransformRefreshResult, error)`
+
+Refreshes a transform now and pushes its rows to the open boards. Calls the `transform.refresh.<transform>`
+procedure, which runs the same tick the data backend runs on the transform's `schedule`: for a materialized
+transform (`materialize: true` in the data template) a `REFRESH MATERIALIZED VIEW`, then the whole view — at
+most 3000 rows, as the scheduled tick publishes it — to every board subscribed to the transform; a plain view is
+only read and published. Boards bound to the transform so show the app's latest writes at once instead of at
+the next tick of its schedule. Call it after the writes a transform-driven menu, list or aggregate depends on — a
+batch import, a configuration change — once per batch rather than per row.
+
+```yaml
+# .ironflock/data-template.yml — the transform the board's widget binds to
+transforms:
+  - tablename: hourly_avg
+    materialize: true
+    schedule: "0 * * * *"   # on its own, the board waits for the next full hour
+    sql: SELECT time_bucket('1 hour', tsp) AS hour, avg(temperature) AS temperature FROM sensordata GROUP BY 1 ORDER BY 1 DESC
+```
+
+```go
+if _, err := ifl.AppendRowsToTable(ctx, "sensordata", []ironflock.Row{
+	{"tsp": "2026-03-01T10:00:00Z", "temperature": 21.5},
+	{"tsp": "2026-03-01T10:01:00Z", "temperature": 21.7},
+}); err != nil {
+	return err
+}
+rctx, cancel := context.WithTimeout(ctx, 30*time.Second) // a long refresh is bounded only by ctx
+defer cancel()
+res, err := ifl.RefreshTransform(rctx, "hourly_avg")
+// &TransformRefreshResult{Success: true, Materialized: true, Refreshed: true, Skipped: false, Published: true, Rows: 168}
+```
+
+Returns a `*TransformRefreshResult`: `Success` (the tick ran); `Materialized` (the transform is a materialized
+view); `Refreshed` (a `REFRESH MATERIALIZED VIEW` ran in this tick); `Skipped` (the refresh was skipped because
+no table the transform reads was written since the last one — the view was current already; the SDK's table
+writes are committed before they return, so a write followed by a refresh is never skipped); `Published` (the
+rows went out to the boards subscribed to the transform; false when no board is open — a normal outcome, not an
+error) and `Rows`, the number of rows published (at most 3000; 0 when `Published` is false). A response of an
+unexpected shape reads as all false.
+
+The data backend keeps the guards of its scheduled refreshes: a call that arrives while a refresh of the same
+transform runs waits for the one refresh queued behind it (so its writes are included), and at most one refresh
+a second starts per transform. A refresh of a heavy view takes as long as the database needs, and the call
+waits for it: pass a `ctx` with a deadline. Only the app's own containers may call it: a board receives the
+rows, and another app reads the transform through `ConnectToApp` but cannot refresh it.
+
+Errors: `ErrInvalidArgument` on an empty name or one with surrounding whitespace; an `*OperationError` when the
+call fails — `URIRefreshInProgress` (the view is held by a refresh the data backend started on its own; call
+again shortly), `URIRefreshFailed` (the refresh, or the read after it, failed in the database; the message
+carries the reason, which is also in the error-logs table) and `URIStorageFull` among the refusals (see
+[Data backend refusals](#data-backend-refusals)), `wamp.error.not_authorized` for a caller that is not one of
+the app's containers — or when the procedure is not registered, which shows only after the reconnect window.
+The data backend registers it only for the transforms of the app's data template, so the error names the causes
+in this order: the name is not a transform's `tablename` (a table has no refresh procedure), the data backend is
+not running, or it predates on-demand transform refresh.
 
 ### `Call(ctx, topic, args ...any) (*Result, error)`
 
@@ -657,7 +715,7 @@ _, err = weather.SubscribeToTable(ctx, "forecasts", func(ev *ironflock.Event) { 
 | `ConnectToApp(ctx, app, opts ...ConnectToAppOptions) (*ConsumedApp, error)` | Opens (or returns the cached) read-only handle. `Stage` selects `"dev"`/`"prod"` (default: this app's stage); `OnError` is called when an open handle is later denied for good (e.g. the grant was revoked) |
 | `ListConsumableApps(ctx) ([]ConsumedAppInfo, error)` | Lists every non-private provider and its catalog without connecting (wildcard consumers) |
 | `ConnectToAllApps(ctx, opts ...ConnectToAllAppsOptions) ([]*ConsumedApp, error)` | Opens every provider with a data backend for the stage (wildcard consumers). Failures go to `OnError` unless `StopOnError` is set |
-| `(*ConsumedApp).GetHistory`, `GetSeriesHistory`, `SubscribeToTable` | As for your own tables (series: tables only). `SubscribeToTable` delivers bulk-inserted rows one at a time and, after a reconnect, the rows stored while the connection was down, exactly like `SubscribeToTable` on your own app |
+| `(*ConsumedApp).GetHistory`, `GetSeriesHistory`, `SubscribeToTable` | As for your own tables (series: tables only). `SubscribeToTable` delivers bulk-inserted rows one at a time and, after a reconnect, the rows stored while the connection was down, exactly like `SubscribeToTable` on your own app. There is no `RefreshTransform` on a consumed app: only the owning app refreshes its transforms and pushes to its boards |
 | `(*ConsumedApp).IsConnected()`, `Connection()` | Whether the connection to the provider is open; the underlying `*wamp.Connection` |
 | `(*ConsumedApp).Close(ctx)` | Closes the handle; `Stop` closes all of them |
 
@@ -794,7 +852,7 @@ connection. A refused action fails with `wamp.error.not_authorized` (`ironflock.
 | `transformed.<table>`, `transformed.bulk.<table>` | subscribe only | `SubscribeToTable` |
 | `databackend.errors.…`, `files.events…` | subscribe only | – (the data backend's error and file events) |
 | `<SWARM_KEY>.<DEVICE_KEY>.<APP_KEY>.<STAGE>.<name>` | register (single), call, publish | `RegisterDeviceFunction`, `CallDeviceFunction` |
-| `append.…`, `appendBulk.…`, `history.transformed.…`, `secret.reveal.…`, `secret.verify.…`, `files.read.…`, `files.write.…` | call (the SDK calls them) | table writes (`PublishToTable` and `ReportError` included), history, secret and file APIs |
+| `append.…`, `appendBulk.…`, `history.transformed.…`, `secret.reveal.…`, `secret.verify.…`, `transform.refresh.<transform>`, `files.read.…`, `files.write.…` | call (the SDK calls them) | table writes (`PublishToTable` and `ReportError` included), history, secret, `RefreshTransform` and file APIs |
 | `sys.appaccess.list`, `sys.appaccess.resolve` | call | `ListConsumableApps`, `ConnectToApp`, `ConnectToAllApps` |
 
 **Identity-checked names.** Names that start with a digit — the table write topics and the device-function
@@ -808,7 +866,7 @@ build these URIs (`RegisterDeviceFunction`, `CallDeviceFunction`), and write row
 **Reserved names.** The router refuses `sys.` apart from the two cross-app procedures above, and `wamp.` apart
 from `wamp.session.get` (the JavaScript SDK's heartbeat). The other names in the table belong to the platform:
 do not start your own names with a digit, `bulk.`, `transformed.`, `databackend.errors.`, `files.`, `append.`,
-`appendBulk.`, `history.` or `secret.`. Every other first segment is your app's own topic space. Nobody
+`appendBulk.`, `history.`, `secret.` or `transform.`. Every other first segment is your app's own topic space. Nobody
 subscribes to raw table topics — the data backend also takes rows published there (boards' forms write there,
 and ironflock-go 1.9.1 and earlier's `PublishToTable` and `PublishRowsToTable` did): they carry the row as sent,
 including the plaintext of secret columns — use `SubscribeToTable`.
@@ -833,8 +891,8 @@ is caught by WebSocket keepalive: the SDK pings every 20 s and drops a link whos
 intervals, then reconnects. This covers subscribe-only apps and cross-app connections, which never write.
 
 Table operations (`PublishToTable`, `AppendToTable`, the bulk variants, `ReportError`, the history, series and
-secret reads, a consumed app's history and series reads, and the catch-up read of a table subscription) ride
-out a platform restart: they wait up to the reconnect window (default 60 s, `WithReconnectWindow`) for the
+secret reads, `RefreshTransform`, a consumed app's history and series reads, and the catch-up read of a table
+subscription) ride out a platform restart: they wait up to the reconnect window (default 60 s, `WithReconnectWindow`) for the
 connection to come back, and retry while the data backend has not registered its procedures again yet (after
 0.5 s, doubling up to 5 s) — so a write or read of a table the data template does not declare (or a misspelled
 name) fails with `wamp.error.no_such_procedure` only once the window is up. The table publishes
@@ -890,10 +948,12 @@ published row the data backend refused without an error).
 | `URIInvalidLimit` | A read of a transform with a `Limit` over 3000 |
 | `URIInvalidTimeRange`, `URIInvalidMetric`, `URIInvalidGroupBy`, `URISeriesTooManyGroups` | Series queries the table cannot answer (see `GetSeriesHistory`) |
 | `URISecretColumn`, `URINotASecretColumn` | A filter on a secret column; `VerifySecret` on a column that is not secret (a table without secret columns has no secret procedures: see [Secret Columns](#secret-columns)) |
-| `URIStorageFull` | A table write while the appliance's disk is nearly full — temporary: write the rows later |
+| `URIStorageFull` | A table write, or a `RefreshTransform`, while the appliance's disk is nearly full — temporary: write the rows, and refresh, later |
 | `URIStorageOverusage` | A table write beyond the account's storage allowance |
 | `URIEntityKeyConflict` | A row whose entity key (`maintainLatestFlagFor`) and `tsp` another row has already, in the batch or stored: give every row its own `tsp` |
 | `URISecretSentinelUnresolvable`, `URISecretCiphertextRejected` | A write that keeps a secret's previous value without an entity key to find it by; a write of an already encrypted value |
+| `URIRefreshInProgress` | A `RefreshTransform` while the view is held by a refresh the data backend started on its own (the first after a setup, say): call again shortly |
+| `URIRefreshFailed` | A `RefreshTransform` whose refresh, or the read after it, the database refused; the message carries its reason (also in the error-logs table) |
 
 ## Advanced usage
 
@@ -923,6 +983,8 @@ it takes the more robust variant; Go-specific choices:
   `IronFlock.Unsubscribe` takes either subscription handle as an `Unsubscriber`. (The 1.9.1 SDKs return
   autobahn's objects, and their `subscribe_to_table`/`subscribeToTable` only the row feed's subscription.)
 - `VerifySecret` returns `{Match, Checked}` (as JavaScript); Python returns only the boolean.
+- `RefreshTransform` returns a struct whose `Rows` is 0 when nothing was published; the Python and JavaScript
+  results omit `rows` then.
 - Filter groups (`Or`/`And`) are supported (as JavaScript), and the cross-app secret-column guard also looks
   inside them.
 - Liveness uses WebSocket pings (as Python); the JavaScript SDK uses a WAMP heartbeat because browsers have no
