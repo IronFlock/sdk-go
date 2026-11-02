@@ -14,8 +14,9 @@ What it models, per declared table of a data template:
   procedures   append.<swarm>.<app>.<t>, appendBulk.<swarm>.<app>.<t>,
                history.transformed.<t>, history.transformed.series.<t>,
                secret.reveal.<t> / secret.verify.<t> (tables with a secret
-               column only), history.transformed.<transform>, the same four
-               for the system table error-logs, sys.appaccess.resolve/list
+               column only), history.transformed.<transform>,
+               transform.refresh.<transform>, the same four for the system
+               table error-logs, sys.appaccess.resolve/list
   topics       <swarm>.<app>.<t> and bulk.<swarm>.<app>.<t> (writes; the
                rows are republished on transformed.<t> / transformed.bulk.<t>)
   requests     typia.assert of TableQueryArgs, SeriesQueryArgs,
@@ -39,6 +40,12 @@ What it models, per declared table of a data template:
                groupBy columns verbatim, empty buckets absent, the typed
                refusals of validateSeriesColumns and invalid_time_range
   transforms   limit <= 3000 (invalid_limit), Limit/Offset/FilterAnd only
+  refresh      transform.refresh.<transform> (caller role app only, [] or
+               [{}]): one transform tick on demand — the view's rows (at most
+               3000, reversed, secrets redacted) published on
+               transformed.<transform> as the cron tick publishes them, and
+               the result {success, materialized, refreshed, skipped,
+               published, rows}
 
 Deviations (none of them reaches a wire shape an SDK can rely on):
   - rows live in memory; a value Postgres would reject (an unparseable tsp, a
@@ -49,8 +56,11 @@ Deviations (none of them reaches a wire shape an SDK can rely on):
     Postgres' other legacy formats are not accepted
   - LIKE on numeric/timestamp/json values matches nothing (filter-core's
     evaluator does the same; Postgres compares their ::TEXT)
-  - continuous aggregates, cron transforms, alarms, the subscriber gate and
-    the realtime size guard are not modeled
+  - continuous aggregates, the cron schedule of transforms (only the
+    on-demand tick is modeled, and it always refreshes and always publishes:
+    no write-generation skip, overlap guard, refresh pacing or subscriber
+    gate), alarms, the subscriber gate and the realtime size guard are not
+    modeled
 """
 
 import datetime
@@ -924,6 +934,9 @@ class TableDef:
         self.chunk_bytes = d.get("x-chunk-bytes")
         # Harness-only: the rows a transform's view yields, in view order.
         self.view_rows = list(d.get("x-rows") or [])
+        # A transform declared materialize: true is a materialized view,
+        # which a tick refreshes before reading it.
+        self.materialize = d.get("materialize") is True
         if not transform and not any(c.id == "tsp" for c in self.columns):
             raise ValueError("table %s: a data template table needs a tsp column" % self.tablename)
 
@@ -1049,6 +1062,7 @@ class Backend:
                 out += [("secret.reveal." + n, "reveal"), ("secret.verify." + n, "verify")]
         for n in self.transforms:
             out.append(("history.transformed." + n, "transform"))
+            out.append(("transform.refresh." + n, "refresh"))
         out += [("sys.appaccess.resolve", "resolve"), ("sys.appaccess.list", "list")]
         return out
 
@@ -1551,6 +1565,35 @@ class Backend:
         offset = query.get("offset") or 0
         rows = rows[offset:offset + query["limit"]]
         return self._respond_rows(transform, details, rows, transform.secret_ids())
+
+    def _rpc_refresh(self, uri, args, kwargs, details):
+        """registerRefreshTransform: one transform tick on demand, the body
+        of the cron tick. App containers only (the caller gate on
+        details.caller_authrole, as for the secret procedures); the arguments
+        are ignored, so [] and [{}] (what the SDKs send) are the same call.
+        The tick: REFRESH MATERIALIZED VIEW when the transform is
+        materialized (always run here: the write-generation skip, the overlap
+        guard and the refresh semaphore are not modeled), then the view — at
+        most 3000 rows, reversed, secrets redacted — published on
+        transformed.<t> with the read publish options, as the cron tick
+        publishes it (always: the subscriber gate is not modeled). The result
+        is the wire contract's {success, materialized, refreshed, skipped,
+        published, rows}."""
+        transform = self.transforms[uri[len("transform.refresh."):]]
+        role = details.get("caller_authrole")
+        if role != "app":
+            raise WampError("wamp.error.not_authorized", [
+                "transform.refresh is callable only by the app's own containers (caller role '%s')" % (role or "unknown")])
+        rows = [dict(r) for r in transform.view_rows[:TRANSFORM_LIMIT_CAP]]
+        rows.reverse()
+        for r in rows:
+            for sid in transform.secret_ids():
+                if r.get(sid) is not None:
+                    r[sid] = SECRET_PLACEHOLDER
+        rows = [wire_value(r) for r in rows]
+        self.publish("transformed." + transform.tablename, [rows], self._publish_options(transform))
+        return {"success": True, "materialized": transform.materialize, "refreshed": transform.materialize,
+                "skipped": False, "published": True, "rows": len(rows)}
 
     # ----------------------------------------------------------- series
 

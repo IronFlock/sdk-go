@@ -330,6 +330,25 @@ class Fleetdb(unittest.TestCase):
         self.assertEqual(got, [{"tsp": 1767232800000, "avg_temperature": 22.5},
                                {"tsp": 1767229200000, "avg_temperature": 22}])
 
+    def test_refresh_transform(self):
+        b, events = backend()
+        published = lambda: [e for e in events if e[0] == "transformed.sensordata_hourly"]
+        self.assertEqual(call(b, "transform.refresh.sensordata_hourly", [{}], details=READER_SESSION)[1],
+                         "wamp.error.not_authorized")
+        self.assertEqual(published(), [])
+        got = call(b, "transform.refresh.sensordata_hourly", [{}])
+        self.assertEqual(got, {"success": True, "materialized": True, "refreshed": True, "skipped": False,
+                               "published": True, "rows": 3})
+        # The whole view, reversed, as one event, as the cron tick publishes it.
+        self.assertEqual(published(), [("transformed.sensordata_hourly", [[
+            {"tsp": 1767232800000, "avg_temperature": 22.5}, {"tsp": 1767229200000, "avg_temperature": 22},
+            {"tsp": 1767225600000, "avg_temperature": 21.5}]], None)])
+        self.assertEqual(call(b, "transform.refresh.sensordata_hourly", [])["rows"], 3)  # the arguments are ignored
+        self.assertNotIn("transform.refresh.sensordata", [u for u, _ in b.procedures()])  # a table has no refresh
+        provider, _ = backend(fake_platform.PROVIDER_TEMPLATE, fake_platform.PROVIDER_FIXTURES)
+        plain = call(provider, "transform.refresh.hourly", [{}])
+        self.assertEqual((plain["materialized"], plain["refreshed"], plain["rows"]), (False, False, 1))
+
     def test_cross_app(self):
         provider, _ = backend(fake_platform.PROVIDER_TEMPLATE, fake_platform.PROVIDER_FIXTURES)
         self.assertEqual(call(provider, "history.transformed.private_stats", [{"limit": 1}], details=READER_SESSION)[1],

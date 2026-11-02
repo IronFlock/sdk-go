@@ -77,6 +77,7 @@ await step("get_series_history", () => ifl.getSeriesHistory("sensordata", {
   metrics: [{ ref: "temperature", method: "AVG" }], limit: 100,
   timeRange: ["2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z"], groupBy: ["device_key"],
 }));
+await step("refresh_transform", () => ifl.refreshTransform("sensordata_hourly"));
 await step("reveal_secrets", () => ifl.revealSecrets("credentials", { limit: 1, filterAnd: [{ latest: true }] }));
 await step("verify_secret_match", () => ifl.verifySecret("credentials", "api_key", "right"));
 await step("verify_secret_limit", () => ifl.verifySecret("credentials", "api_key", "wrong", { limit: 3 }));

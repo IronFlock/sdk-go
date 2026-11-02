@@ -733,6 +733,10 @@ func gatedOps() []gatedOp {
 			_, err := f.VerifySecret(bg, "sensordata", "pin", "1234", q)
 			return err
 		}},
+		{"RefreshTransform", tableOp, func(f *testFlock) error {
+			_, err := f.RefreshTransform(bg, "hourly_avg")
+			return err
+		}},
 		{"Publish", windowOp, func(f *testFlock) error { return f.Publish(bg, "com.example.topic", 1) }},
 		{"Call", plainOp, func(f *testFlock) error {
 			_, err := f.Call(bg, "com.example.procedure")

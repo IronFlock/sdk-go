@@ -148,6 +148,20 @@ func TestCrossSDKScenario(t *testing.T) {
 			GroupBy:   []string{"device_key"},
 		})
 	})
+	step("refresh_transform", func() (any, error) {
+		r, err := ifl.RefreshTransform(ctx, "sensordata_hourly")
+		if err != nil {
+			return nil, err
+		}
+		// The result as the Python SDK's dict: rows only when published, as
+		// on the wire.
+		out := map[string]any{"success": r.Success, "materialized": r.Materialized, "refreshed": r.Refreshed,
+			"skipped": r.Skipped, "published": r.Published}
+		if r.Published {
+			out["rows"] = r.Rows
+		}
+		return out, nil
+	})
 	step("reveal_secrets", func() (any, error) {
 		return ifl.RevealSecrets(ctx, "credentials", &ironflock.TableQueryParams{Limit: 1, FilterAnd: []ironflock.Filter{ironflock.Latest()}})
 	})

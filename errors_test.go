@@ -41,7 +41,7 @@ func TestOperationErrorMessages(t *testing.T) {
 func TestErrorPassThrough(t *testing.T) {
 	client := []error{invalidf("x"), missingConfigf("y")}
 	for _, err := range client {
-		if operationFailed("op", err) != err || historyFailed("op", "t", err, false) != err {
+		if operationFailed("op", err) != err || historyFailed("op", "t", err, "") != err {
 			t.Errorf("%v was wrapped", err)
 		}
 	}
@@ -49,7 +49,7 @@ func TestErrorPassThrough(t *testing.T) {
 	if operationFailed("op", cerr) != error(cerr) {
 		t.Error("a CrossAppAccessError was wrapped")
 	}
-	if operationFailed("op", nil) != nil || historyFailed("op", "t", nil, true) != nil {
+	if operationFailed("op", nil) != nil || historyFailed("op", "t", nil, secretRPCHint) != nil {
 		t.Error("nil must stay nil")
 	}
 	if err := operationFailed("op", context.DeadlineExceeded); !errors.Is(err, context.DeadlineExceeded) {
@@ -143,6 +143,8 @@ func TestDataBackendRefusals(t *testing.T) {
 		URIEntityKeyConflict:          "sys.dataservice.error.entity_key_conflict",
 		URISecretSentinelUnresolvable: "sys.dataservice.error.secret_sentinel_unresolvable",
 		URISecretCiphertextRejected:   "sys.dataservice.error.secret_ciphertext_rejected",
+		URIRefreshInProgress:          "sys.dataservice.error.refresh_in_progress",
+		URIRefreshFailed:              "sys.dataservice.error.refresh_failed",
 	} {
 		if got != want {
 			t.Errorf("%s, want %s", got, want)
