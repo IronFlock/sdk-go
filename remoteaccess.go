@@ -23,7 +23,8 @@ const maxDNSLabelLength = 63
 //
 // http and https ports are served under the tunnel label
 // <DEVICE_KEY>-<app name, lower case>-<port> (https ports with the
-// platform's "secure-" prefix) on the tunnel domain the device agent injects
+// platform's "secure-" prefix, a development run's ports with a "-dev"
+// suffix) on the tunnel domain the device agent injects
 // (TUNNEL_DOMAIN), always as an https:// URL. On a device that belongs to an
 // instance (appliance, INSTANCE_KEY set) the cloud-forwarded route
 // https://i<INSTANCE_KEY>-<label>.<CLOUD_TUNNEL_DOMAIN> is returned instead.
@@ -52,12 +53,14 @@ const maxDNSLabelLength = 63
 // point at localhost: such an appliance serves app ports on its host ports,
 // which a tunnel URL cannot express.
 //
-// In a DEV container the http(s) URL is the one of the PROD install of the
-// same app on this device (the label has no stage), not the development run's
-// own tunnel, which the IDE's side menu opens. A tcp/udp URL is the
-// development run's own: its tunnel comes up after the container started, and
-// the agent announces its remote port in /data/env only while it is up, so the
-// result is false until then.
+// The stage is the one of the realm the app joins (see Stage). In a DEV
+// container the http(s) URL is the development run's own tunnel, whose label
+// ends in -dev (https://42-myapp-8080-dev.app.ironflock.com), so it never
+// collides with the PROD install of the same app on this device; agents
+// before 1.4.9 tunnel no development run, so it is not served there. A
+// tcp/udp URL is the development run's own too: its tunnel comes up after the
+// container started, and the agent announces its remote port in /data/env
+// only while it is up, so the result is false until then.
 //
 // The values come from /data/env, which older agents make readable by root
 // only: in a container there running as another user they are the values the
@@ -100,6 +103,11 @@ func (f *IronFlock) GetRemoteAccessURLForPort(port int, protocol, remotePortEnvi
 		return "", false
 	}
 	label := fmt.Sprintf("%s-%s-%d", f.deviceKey, strings.ToLower(f.appName), port)
+	if f.stage == StageDevelopment {
+		// A development run's tunnel carries -dev after the port, so it
+		// never collides with the PROD install's (CreateSubdomain).
+		label += "-dev"
+	}
 	if protocol == "https" {
 		// https-protocol tunnels get secure- prefixed subdomains platform-wide.
 		label = "secure-" + label
