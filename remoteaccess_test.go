@@ -10,12 +10,14 @@ import (
 	"github.com/ironflock/sdk-go/internal/env"
 )
 
-// remoteFlock is an IronFlock with device key 42 and app name MyApp.
+// remoteFlock is an IronFlock with device key 42 and app name MyApp, a PROD
+// install unless env sets ENV.
 func remoteFlock(t *testing.T, env map[string]string) *testFlock {
 	t.Helper()
 	setIdentityEnv(t)
 	t.Setenv("DEVICE_KEY", "42")
 	t.Setenv("APP_NAME", "MyApp")
+	t.Setenv("ENV", "PROD")
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
@@ -40,6 +42,15 @@ func TestRemoteAccessURLForHTTPPorts(t *testing.T) {
 		{"https", nil, 8443, "https", "https://secure-42-myapp-8443.app.ironflock.com"},
 		{"https instance", map[string]string{"INSTANCE_KEY": "5"}, 8443, "https", "https://i5-secure-42-myapp-8443.app.ironflock.com"},
 		{"protocol case", nil, 8443, "HTTPS", "https://secure-42-myapp-8443.app.ironflock.com"},
+		{"prod in any case", map[string]string{"ENV": "prod"}, 8080, "http", "https://42-myapp-8080.app.ironflock.com"},
+		// A development run's label ends in -dev, after the port (the agent's
+		// CreateSubdomain): the PROD install keeps its own.
+		{"dev", map[string]string{"ENV": "DEV"}, 51821, "http", "https://42-myapp-51821-dev.app.ironflock.com"},
+		{"dev https", map[string]string{"ENV": "DEV"}, 8443, "https", "https://secure-42-myapp-8443-dev.app.ironflock.com"},
+		{"dev instance", map[string]string{"ENV": "DEV", "INSTANCE_KEY": "5"}, 1881, "http", "https://i5-42-myapp-1881-dev.app.ironflock.com"},
+		{"dev https instance", map[string]string{"ENV": "DEV", "INSTANCE_KEY": "5"}, 8443, "https", "https://i5-secure-42-myapp-8443-dev.app.ironflock.com"},
+		{"dev tunnel domain", map[string]string{"ENV": "DEV", "TUNNEL_DOMAIN": "appliance.local"}, 8080, "http", "https://42-myapp-8080-dev.appliance.local"},
+		{"no ENV is dev", map[string]string{"ENV": ""}, 8080, "http", "https://42-myapp-8080-dev.app.ironflock.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,6 +76,8 @@ func TestRemoteAccessURLUnavailable(t *testing.T) {
 		{"dotted app name", map[string]string{"APP_NAME": "my.app"}, 8080, "http", ""},
 		{"no device key", map[string]string{"DEVICE_KEY": ""}, 8080, "http", ""},
 		{"no app name", map[string]string{"APP_NAME": ""}, 8080, "http", ""},
+		// 63 characters for PROD, 67 with the -dev suffix.
+		{"dev label longer than 63", map[string]string{"ENV": "DEV", "APP_NAME": strings.Repeat("a", 63-len("42--8080"))}, 8080, "http", ""},
 		{"unknown protocol", nil, 5000, "sctp", ""},
 		{"tcp port not announced", nil, 5000, "tcp", ""},
 		{"tcp port not injected", nil, 5000, "tcp", "NOT_SET_ANYWHERE"},
@@ -104,6 +117,8 @@ func TestRemoteAccessURLForTCPAndUDPPorts(t *testing.T) {
 		{"instance cloud port, cloud edge", map[string]string{"INSTANCE_KEY": "5", "CLOUD_TUNNEL_DOMAIN": "edge.example", "MY_TCP_PORT_CLOUD": "31099"}, "tcp", "MY_TCP_PORT", "tcp://edge.example:31099"},
 		{"cloud port ignored without instance", map[string]string{"MY_TCP_PORT": "30012", "MY_TCP_PORT_CLOUD": "31099"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
 		{"no device identity needed", map[string]string{"DEVICE_KEY": "", "APP_NAME": "", "MY_TCP_PORT": "30012"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
+		// The URL names the remote port, not a label: no stage in it.
+		{"dev", map[string]string{"ENV": "DEV", "MY_TCP_PORT": "30012"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

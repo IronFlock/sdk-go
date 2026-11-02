@@ -623,7 +623,7 @@ answers it on the app's realm yet, so it fails with `wamp.error.no_such_procedur
 
 The public URL under which a port declared in `port-template.yml` is reachable once its tunnel is active,
 e.g. `https://<device_key>-<app_name>-8080.app.ironflock.com` (the app name in lower case; the label of an
-`https` port starts with `secure-`). `protocol` is `http` (default when empty), `https`, `tcp` or `udp`. On a
+`https` port starts with `secure-`, the label of a development run's port ends in `-dev`). `protocol` is `http` (default when empty), `https`, `tcp` or `udp`. On a
 device of an instance (`INSTANCE_KEY` set) an http(s) URL is the route through the cloud tunnel edge,
 `https://i<INSTANCE_KEY>-<label>.<CLOUD_TUNNEL_DOMAIN>`. The result is `false` when no URL can be composed: an
 unknown protocol, no device key or app name, a tcp/udp port without a public port, or a label over 63
@@ -637,8 +637,17 @@ instead — the template's own `remote_port_environment`, which older agents nee
 internet-facing port, the variable's `_CLOUD` companion, is preferred while the agent announces it; once it is
 gone (cloud forwarding turned off), the instance-local URL is returned again.
 
-In a DEV container the http(s) URL is that of the PROD install of the same app, not the development run's
-own tunnel; a tcp/udp URL is the development run's own, once its tunnel is up. On an appliance installed without a domain (plain mode) the
+The stage is the one of the realm the app joins (`ENV`: `PROD` is production, anything else development). In a
+DEV container the http(s) URL is the development run's own tunnel, whose label ends in `-dev`, so it never
+collides with the PROD install of the same app on this device:
+
+| Run | URL of port 51821 |
+|-----|-------------------|
+| Development | `https://4749-wireguard_easy-51821-dev.app.ironflock.com` |
+| Production | `https://4749-wireguard_easy-51821.app.ironflock.com` |
+
+Device agents before 1.4.9 tunnel no development run, so the URL is not served there. A tcp/udp URL is the
+development run's own too, once its tunnel is up. On an appliance installed without a domain (plain mode) the
 agent sets the tunnel domain to `localhost`. The platform does not set `CLOUD_TUNNEL_DOMAIN`: an instance's
 URLs use `app.ironflock.com` unless the app sets that variable itself.
 
