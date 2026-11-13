@@ -623,19 +623,30 @@ answers it on the app's realm yet, so it fails with `wamp.error.no_such_procedur
 
 The public URL under which a port declared in `port-template.yml` is reachable once its tunnel is active,
 e.g. `https://<device_key>-<app_name>-8080.app.ironflock.com` (the app name in lower case; the label of an
-`https` port starts with `secure-`, the label of a development run's port ends in `-dev`). `protocol` is `http` (default when empty), `https`, `tcp` or `udp`. On a
-device of an instance (`INSTANCE_KEY` set) an http(s) URL is the route through the cloud tunnel edge,
-`https://i<INSTANCE_KEY>-<label>.<CLOUD_TUNNEL_DOMAIN>`. The result is `false` when no URL can be composed: an
+`https` port starts with `secure-`, the label of a development run's port ends in `-dev`). `protocol` is `http` (default when empty), `https`, `tcp` or `udp`.
+The result is `false` when no URL can be composed: an
 unknown protocol, no device key or app name, a tcp/udp port without a public port, or a label over 63
 characters or with a dot (an app name with a dot cannot be tunneled). The port variables are read live from
-`/data/env`, so call it again rather than caching the result; `TUNNEL_DOMAIN`, `CLOUD_TUNNEL_DOMAIN` and
-`INSTANCE_KEY` come from the environment the app started with.
+`/data/env`, so call it again rather than caching the result; `STUDIO_URL` and `TUNNEL_DOMAIN` come from the
+environment the app started with.
+
+The URL is on the tunnel domain of the platform the device belongs to. `STUDIO_URL`, which the device agent
+injects, alone decides which that is:
+
+| `STUDIO_URL` | The device belongs to | Tunnel domain |
+|--------------|-----------------------|---------------|
+| `https://studio.ironflock.com` | the IronFlock cloud | `app.ironflock.com` |
+| anything else | an appliance | the appliance's own, which the agent injects as `TUNNEL_DOMAIN` |
+
+A device attached to an appliance always gets the appliance's tunnel URL, never one on the cloud's edge, also
+while the appliance forwards its tunnels to the cloud: `INSTANCE_KEY` and the `_CLOUD` remote ports play no
+part. Where `TUNNEL_DOMAIN` is unset or empty (no device agent, or one before 0.19.2), the domain is
+`app.ironflock.com`.
 
 A tcp/udp URL carries the public port the tunnel assigned, which the device agent announces as
-`REMOTE_PORT_FOR_<port>` (agent 0.19.8 and later); a non-empty `remotePortEnvironment` names the variable to read
-instead — the template's own `remote_port_environment`, which older agents need. On an instance device the
-internet-facing port, the variable's `_CLOUD` companion, is preferred while the agent announces it; once it is
-gone (cloud forwarding turned off), the instance-local URL is returned again.
+`REMOTE_PORT_FOR_<port>` (agent 0.19.8 and later): `<protocol>://<tunnel domain>:<remote port>`. A non-empty
+`remotePortEnvironment` names the variable to read instead — the template's own `remote_port_environment`,
+which older agents need.
 
 The stage is the one of the realm the app joins (`ENV`: `PROD` is production, anything else development). In a
 DEV container the http(s) URL is the development run's own tunnel, whose label ends in `-dev`, so it never
@@ -648,8 +659,7 @@ collides with the PROD install of the same app on this device:
 
 Device agents before 1.4.9 tunnel no development run, so the URL is not served there. A tcp/udp URL is the
 development run's own too, once its tunnel is up. On an appliance installed without a domain (plain mode) the
-agent sets the tunnel domain to `localhost`. The platform does not set `CLOUD_TUNNEL_DOMAIN`: an instance's
-URLs use `app.ironflock.com` unless the app sets that variable itself.
+agent sets `TUNNEL_DOMAIN=localhost`, so the URLs point at localhost.
 
 ## Secret Columns
 

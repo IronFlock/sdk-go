@@ -18,11 +18,6 @@ import (
 // name. Overridable with the IRONFLOCK_ENV_DIR environment variable.
 const DefaultDir = "/data/env"
 
-// markerName names a file the device agent writes into its mirror when it
-// creates the app's container, and never removes: a readable one tells the
-// agent's mirror from a directory of the app's own (or none).
-const markerName = "DEVICE_SERIAL_NUMBER"
-
 // Dir returns the directory holding the agent-maintained value files.
 func Dir() string {
 	if dir, ok := os.LookupEnv("IRONFLOCK_ENV_DIR"); ok {
@@ -60,31 +55,6 @@ func Lookup(name string) (value string, err error) {
 	return os.Getenv(name), err
 }
 
-// LookupLive returns a value the device agent removes from its mirror when
-// it no longer applies, such as an instance's cloud tunnel port
-// (<name>_CLOUD). A file for name is the value, also when it is empty.
-// Without one, the agent's mirror decides: while it is present — its
-// DEVICE_SERIAL_NUMBER.txt is readable — there is no value (the agent
-// removed it), and the environment variable is not consulted, as it still
-// holds the value the container started with. Without the mirror (outside
-// the device agent, or an app's own /data/env) the value is the environment
-// variable. err reports a file that exists but cannot be read; value is then
-// the environment variable.
-func LookupLive(name string) (value string, err error) {
-	value, ok, err := readFile(name)
-	switch {
-	case ok:
-		return value, nil // the agent's word, also when it is empty
-	case err != nil:
-		return os.Getenv(name), err
-	}
-	_, mirrored, err := readFile(markerName)
-	if mirrored {
-		return "", nil // the agent removed it
-	}
-	return os.Getenv(name), err
-}
-
 // readFile reads the mirror file of name, trimmed. ok is false when there is
 // no such file, or when it cannot be read (err).
 func readFile(name string) (value string, ok bool, err error) {
@@ -109,7 +79,7 @@ func absent(err error) bool {
 var warned atomic.Bool
 
 // WarnUnreadable logs err, a failure to read the device agent's mirror (as
-// Lookup and LookupLive report it), as a warning to log (slog.Default() when
+// Lookup reports it), as a warning to log (slog.Default() when
 // nil) — once per process: the mirror's permissions do not change while the
 // app runs, and its values are read again and again. A nil err logs
 // nothing.
@@ -123,7 +93,7 @@ func WarnUnreadable(log *slog.Logger, err error) {
 	dir := Dir()
 	log.Warn(fmt.Sprintf("Cannot read the values the IronFlock device agent keeps up to date in %s (%v); "+
 		"using the environment the container started with instead. Values the agent changes while the app "+
-		"runs (a rotated app credential, an instance's cloud tunnel ports) will not reach this app. Older agents "+
+		"runs (a rotated app credential, a tunnel's remote port) will not reach this app. Older agents "+
 		"make %s readable by root only: update the device agent, or run the app's container as root.",
 		dir, err, dir))
 }

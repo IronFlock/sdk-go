@@ -1,6 +1,6 @@
 module github.com/ironflock/sdk-go
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/ironflock/nexus/v3 v3.4.2

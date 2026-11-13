@@ -36,19 +36,16 @@ func TestRemoteAccessURLForHTTPPorts(t *testing.T) {
 		{"explicit http", nil, 8080, "http", "https://42-myapp-8080.app.ironflock.com"},
 		{"tunnel domain", map[string]string{"TUNNEL_DOMAIN": "app.ironflock.dev"}, 8080, "http", "https://42-myapp-8080.app.ironflock.dev"},
 		{"empty tunnel domain", map[string]string{"TUNNEL_DOMAIN": ""}, 8080, "http", "https://42-myapp-8080.app.ironflock.com"},
-		{"instance", map[string]string{"INSTANCE_KEY": "5"}, 1881, "http", "https://i5-42-myapp-1881.app.ironflock.com"},
-		{"instance ignores local domain", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local"}, 1881, "http", "https://i5-42-myapp-1881.app.ironflock.com"},
-		{"instance cloud edge", map[string]string{"INSTANCE_KEY": "5", "CLOUD_TUNNEL_DOMAIN": "app.ironflock.dev"}, 1881, "http", "https://i5-42-myapp-1881.app.ironflock.dev"},
 		{"https", nil, 8443, "https", "https://secure-42-myapp-8443.app.ironflock.com"},
-		{"https instance", map[string]string{"INSTANCE_KEY": "5"}, 8443, "https", "https://i5-secure-42-myapp-8443.app.ironflock.com"},
 		{"protocol case", nil, 8443, "HTTPS", "https://secure-42-myapp-8443.app.ironflock.com"},
 		{"prod in any case", map[string]string{"ENV": "prod"}, 8080, "http", "https://42-myapp-8080.app.ironflock.com"},
 		// A development run's label ends in -dev, after the port (the agent's
 		// CreateSubdomain): the PROD install keeps its own.
 		{"dev", map[string]string{"ENV": "DEV"}, 51821, "http", "https://42-myapp-51821-dev.app.ironflock.com"},
 		{"dev https", map[string]string{"ENV": "DEV"}, 8443, "https", "https://secure-42-myapp-8443-dev.app.ironflock.com"},
-		{"dev instance", map[string]string{"ENV": "DEV", "INSTANCE_KEY": "5"}, 1881, "http", "https://i5-42-myapp-1881-dev.app.ironflock.com"},
-		{"dev https instance", map[string]string{"ENV": "DEV", "INSTANCE_KEY": "5"}, 8443, "https", "https://i5-secure-42-myapp-8443-dev.app.ironflock.com"},
+		{"dev cloud device", map[string]string{"ENV": "DEV", "STUDIO_URL": cloudStudio}, 1881, "http", "https://42-myapp-1881-dev.app.ironflock.com"},
+		{"dev appliance device", map[string]string{"ENV": "DEV", "STUDIO_URL": applianceStudio, "TUNNEL_DOMAIN": "appliance.example", "INSTANCE_KEY": "5"},
+			8443, "https", "https://secure-42-myapp-8443-dev.appliance.example"},
 		{"dev tunnel domain", map[string]string{"ENV": "DEV", "TUNNEL_DOMAIN": "appliance.local"}, 8080, "http", "https://42-myapp-8080-dev.appliance.local"},
 		{"no ENV is dev", map[string]string{"ENV": ""}, 8080, "http", "https://42-myapp-8080-dev.app.ironflock.com"},
 	}
@@ -63,6 +60,89 @@ func TestRemoteAccessURLForHTTPPorts(t *testing.T) {
 	}
 }
 
+// The Studio URLs of the cloud and of an appliance, as the agent injects them.
+const (
+	cloudStudio     = "https://studio.ironflock.com"
+	applianceStudio = "https://studio.appliance.example"
+)
+
+// STUDIO_URL alone decides the tunnel domain: the cloud's edge for the
+// cloud's Studio, the appliance's own (TUNNEL_DOMAIN) for any other. A device
+// of an appliance gets the appliance's tunnel URL only — INSTANCE_KEY and the
+// _CLOUD remote ports play no part.
+func TestRemoteAccessURLFollowsTheStudioURL(t *testing.T) {
+	appliance := func(extra map[string]string) map[string]string {
+		env := map[string]string{"STUDIO_URL": applianceStudio, "TUNNEL_DOMAIN": "appliance.example"}
+		for k, v := range extra {
+			env[k] = v
+		}
+		return env
+	}
+	cases := []struct {
+		name     string
+		env      map[string]string
+		port     int
+		protocol string
+		portEnv  string
+		want     string
+	}{
+		{"a cloud device", map[string]string{"STUDIO_URL": cloudStudio, "TUNNEL_DOMAIN": "app.ironflock.com"},
+			1881, "http", "", "https://42-myapp-1881.app.ironflock.com"},
+		// Told from an appliance by the Studio alone: the cloud's edge, though
+		// TUNNEL_DOMAIN names another domain.
+		{"the cloud Studio with a trailing slash", map[string]string{"STUDIO_URL": cloudStudio + "/", "TUNNEL_DOMAIN": "appliance.example"},
+			1881, "http", "", "https://42-myapp-1881.app.ironflock.com"},
+		{"the cloud Studio, padded", map[string]string{"STUDIO_URL": " " + cloudStudio + " ", "TUNNEL_DOMAIN": "appliance.example"},
+			1881, "http", "", "https://42-myapp-1881.app.ironflock.com"},
+		{"the cloud Studio in another case", map[string]string{"STUDIO_URL": "https://Studio.IronFlock.com", "TUNNEL_DOMAIN": "appliance.example"},
+			1881, "http", "", "https://42-myapp-1881.app.ironflock.com"},
+		// INSTANCE_KEY makes no appliance of a cloud device.
+		{"a cloud device with an instance key", map[string]string{"STUDIO_URL": cloudStudio, "INSTANCE_KEY": "5"},
+			1881, "http", "", "https://42-myapp-1881.app.ironflock.com"},
+		{"a cloud device, tcp", map[string]string{"STUDIO_URL": cloudStudio, "INSTANCE_KEY": "5", "REMOTE_PORT_FOR_5900": "30005"},
+			5900, "tcp", "", "tcp://app.ironflock.com:30005"},
+
+		{"an appliance device", appliance(nil), 1881, "http", "", "https://42-myapp-1881.appliance.example"},
+		{"an appliance device, https", appliance(nil), 8443, "https", "", "https://secure-42-myapp-8443.appliance.example"},
+		// An appliance that forwards its tunnels to the cloud: the agent
+		// injects INSTANCE_KEY, and the route
+		// https://i5-42-myapp-1881.app.ironflock.com exists. The device's URL
+		// is the appliance's all the same.
+		{"an appliance device never gets the cloud-forwarded route", appliance(map[string]string{"INSTANCE_KEY": "5"}),
+			1881, "http", "", "https://42-myapp-1881.appliance.example"},
+		// The same for tcp/udp: the _CLOUD companion is the port on the
+		// cloud's edge.
+		{"an appliance device never gets the cloud port",
+			appliance(map[string]string{"INSTANCE_KEY": "5", "MY_TCP_PORT": "30012", "MY_TCP_PORT_CLOUD": "31099"}),
+			5000, "tcp", "MY_TCP_PORT", "tcp://appliance.example:30012"},
+
+		{"another cloud's Studio is an appliance", map[string]string{"STUDIO_URL": "https://studio.ironflock.dev", "TUNNEL_DOMAIN": "tunnel.example"},
+			8080, "http", "", "https://42-myapp-8080.tunnel.example"},
+		{"a Studio that only starts like the cloud's", map[string]string{"STUDIO_URL": cloudStudio + ".appliance.example", "TUNNEL_DOMAIN": "tunnel.example"},
+			8080, "http", "", "https://42-myapp-8080.tunnel.example"},
+		{"the cloud's host over http", map[string]string{"STUDIO_URL": "http://studio.ironflock.com", "TUNNEL_DOMAIN": "tunnel.example"},
+			8080, "http", "", "https://42-myapp-8080.tunnel.example"},
+		{"a local Studio", map[string]string{"STUDIO_URL": "http://localhost:8086", "TUNNEL_DOMAIN": "tunnel.example"},
+			8080, "http", "", "https://42-myapp-8080.tunnel.example"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := remoteFlock(t, tc.env)
+			got, ok := f.GetRemoteAccessURLForPort(tc.port, tc.protocol, tc.portEnv)
+			if !ok || got != tc.want {
+				t.Errorf("got %q, %v; want %q", got, ok, tc.want)
+			}
+		})
+	}
+
+	// The agent's mirror announces the cloud port too: not used either.
+	f := remoteFlock(t, appliance(map[string]string{"INSTANCE_KEY": "5", "REMOTE_PORT_FOR_1700": "30006"}))
+	writeEnvFiles(t, map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "REMOTE_PORT_FOR_1700": "30006", "REMOTE_PORT_FOR_1700_CLOUD": "31099"})
+	if got, _ := f.GetRemoteAccessURLForPort(1700, "udp", ""); got != "udp://appliance.example:30006" {
+		t.Errorf("with the cloud port in the agent's mirror: %q", got)
+	}
+}
+
 func TestRemoteAccessURLUnavailable(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -72,7 +152,6 @@ func TestRemoteAccessURLUnavailable(t *testing.T) {
 		portEnv  string
 	}{
 		{"label longer than 63", map[string]string{"APP_NAME": strings.Repeat("a", 60)}, 8080, "http", ""},
-		{"instance label longer than 63", map[string]string{"APP_NAME": strings.Repeat("a", 50), "INSTANCE_KEY": "12345"}, 8080, "http", ""},
 		{"dotted app name", map[string]string{"APP_NAME": "my.app"}, 8080, "http", ""},
 		{"no device key", map[string]string{"DEVICE_KEY": ""}, 8080, "http", ""},
 		{"no app name", map[string]string{"APP_NAME": ""}, 8080, "http", ""},
@@ -112,10 +191,7 @@ func TestRemoteAccessURLForTCPAndUDPPorts(t *testing.T) {
 		{"tcp cloud device", map[string]string{"MY_TCP_PORT": "30012"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
 		{"udp", map[string]string{"WG_PORT": "30013"}, "udp", "WG_PORT", "udp://app.ironflock.com:30013"},
 		{"tunnel domain", map[string]string{"MY_TCP_PORT": "30012", "TUNNEL_DOMAIN": "appliance.local"}, "tcp", "MY_TCP_PORT", "tcp://appliance.local:30012"},
-		{"instance without cloud port", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local", "MY_TCP_PORT": "30012"}, "tcp", "MY_TCP_PORT", "tcp://appliance.local:30012"},
-		{"instance cloud port", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local", "MY_TCP_PORT": "30012", "MY_TCP_PORT_CLOUD": "31099"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:31099"},
-		{"instance cloud port, cloud edge", map[string]string{"INSTANCE_KEY": "5", "CLOUD_TUNNEL_DOMAIN": "edge.example", "MY_TCP_PORT_CLOUD": "31099"}, "tcp", "MY_TCP_PORT", "tcp://edge.example:31099"},
-		{"cloud port ignored without instance", map[string]string{"MY_TCP_PORT": "30012", "MY_TCP_PORT_CLOUD": "31099"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
+		{"a cloud port is ignored", map[string]string{"MY_TCP_PORT": "30012", "MY_TCP_PORT_CLOUD": "31099"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
 		{"no device identity needed", map[string]string{"DEVICE_KEY": "", "APP_NAME": "", "MY_TCP_PORT": "30012"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
 		// The URL names the remote port, not a label: no stage in it.
 		{"dev", map[string]string{"ENV": "DEV", "MY_TCP_PORT": "30012"}, "tcp", "MY_TCP_PORT", "tcp://app.ironflock.com:30012"},
@@ -151,28 +227,31 @@ func TestRemoteAccessURLReadsLiveEnvFiles(t *testing.T) {
 	}
 }
 
-func TestRemoteAccessURLPicksUpTheCloudPortWithoutRestart(t *testing.T) {
-	f := remoteFlock(t, map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local", "MY_TCP_PORT": "30012"})
+// A development run's tunnel comes up after its container started: the agent
+// then writes the port's file into the running container, and removes it when
+// the tunnel goes.
+func TestRemoteAccessURLPicksUpAPortAnnouncedAfterTheStart(t *testing.T) {
+	f := remoteFlock(t, map[string]string{"TUNNEL_DOMAIN": "appliance.local"})
 	dir := os.Getenv("IRONFLOCK_ENV_DIR")
 	url := func() string {
-		got, _ := f.GetRemoteAccessURLForPort(5000, "tcp", "MY_TCP_PORT")
+		got, _ := f.GetRemoteAccessURLForPort(5000, "tcp", "")
 		return got
 	}
-	if got := url(); got != "tcp://appliance.local:30012" {
-		t.Fatalf("before the cloud port: %q", got)
+	if got := url(); got != "" {
+		t.Fatalf("before the port: %q", got)
 	}
-	cloud := filepath.Join(dir, "MY_TCP_PORT_CLOUD.txt")
-	if err := os.WriteFile(cloud, []byte("31099"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if got := url(); got != "tcp://app.ironflock.com:31099" {
-		t.Errorf("after the agent wrote the cloud port: %q", got)
-	}
-	if err := os.Remove(cloud); err != nil {
+	port := filepath.Join(dir, "REMOTE_PORT_FOR_5000.txt")
+	if err := os.WriteFile(port, []byte("30012"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if got := url(); got != "tcp://appliance.local:30012" {
-		t.Errorf("after the cloud port was removed: %q", got)
+		t.Errorf("after the agent wrote the port: %q", got)
+	}
+	if err := os.Remove(port); err != nil {
+		t.Fatal(err)
+	}
+	if got := url(); got != "" {
+		t.Errorf("after the port was removed: %q", got)
 	}
 }
 
@@ -196,9 +275,8 @@ func writeEnvFiles(t *testing.T, files map[string]string) {
 }
 
 // Since agent 0.19.8 every port rule's tunnel port is announced as
-// REMOTE_PORT_FOR_<port> (plus REMOTE_PORT_FOR_<port>_CLOUD on instances), the
-// name the platform docs give: a tcp/udp port declared without
-// remote_port_environment has a URL too.
+// REMOTE_PORT_FOR_<port>, the name the platform docs give: a tcp/udp port
+// declared without remote_port_environment has a URL too.
 func TestRemoteAccessURLReadsTheCanonicalPortName(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -211,19 +289,13 @@ func TestRemoteAccessURLReadsTheCanonicalPortName(t *testing.T) {
 		{"tcp", map[string]string{"REMOTE_PORT_FOR_5900": "30005"}, nil, 5900, "tcp", "tcp://app.ironflock.com:30005"},
 		{"udp, tunnel domain", map[string]string{"REMOTE_PORT_FOR_1700": "30006", "TUNNEL_DOMAIN": "appliance.local"}, nil,
 			1700, "udp", "udp://appliance.local:30006"},
-		{"instance cloud port", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local",
-			"REMOTE_PORT_FOR_1700": "30006", "REMOTE_PORT_FOR_1700_CLOUD": "31099"}, nil, 1700, "udp", "udp://app.ironflock.com:31099"},
-		{"instance before the cloud port", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local",
-			"REMOTE_PORT_FOR_1700": "30006"}, nil, 1700, "udp", "udp://appliance.local:30006"},
-		{"instance cloud port 0", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local",
-			"REMOTE_PORT_FOR_1700": "30006", "REMOTE_PORT_FOR_1700_CLOUD": "0"}, nil, 1700, "udp", "udp://appliance.local:30006"},
 		// What refreshRemotePortEnvFiles writes for rules without
-		// remote_port_environment, on an instance device.
-		{"the agent's files", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local"},
-			map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "REMOTE_PORT_FOR_5900": "30005", "REMOTE_PORT_FOR_1700": "30006",
-				"REMOTE_PORT_FOR_1700_CLOUD": "31099"}, 1700, "udp", "udp://app.ironflock.com:31099"},
-		{"the agent's files, no cloud port", map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local"},
-			map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "REMOTE_PORT_FOR_5900": "30005"}, 5900, "tcp", "tcp://appliance.local:30005"},
+		// remote_port_environment.
+		{"the agent's files", map[string]string{"TUNNEL_DOMAIN": "appliance.local"},
+			map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "REMOTE_PORT_FOR_5900": "30005", "REMOTE_PORT_FOR_1700": "30006"},
+			1700, "udp", "udp://appliance.local:30006"},
+		{"the agent's file over the start-time variable", map[string]string{"TUNNEL_DOMAIN": "appliance.local", "REMOTE_PORT_FOR_5900": "30005"},
+			map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "REMOTE_PORT_FOR_5900": "30007"}, 5900, "tcp", "tcp://appliance.local:30007"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -244,45 +316,6 @@ func TestRemoteAccessURLReadsTheCanonicalPortName(t *testing.T) {
 	}
 }
 
-// When an instance's cloud port goes away (forwarding turned off, the tunnel
-// gone), the agent deletes <name>_CLOUD.txt from its mirror. The variable of
-// the same name keeps the port the container started with: it must not bring
-// the dead cloud URL back.
-func TestRemoteAccessURLDropsACloudPortTheAgentRemoved(t *testing.T) {
-	startEnv := map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local",
-		"MY_TCP_PORT": "30012", "MY_TCP_PORT_CLOUD": "31099"}
-	url := func(f *testFlock) string {
-		got, _ := f.GetRemoteAccessURLForPort(5000, "tcp", "MY_TCP_PORT")
-		return got
-	}
-
-	f := remoteFlock(t, startEnv)
-	writeEnvFiles(t, map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "MY_TCP_PORT": "30012", "MY_TCP_PORT_CLOUD": "31099"})
-	if got := url(f); got != "tcp://app.ironflock.com:31099" {
-		t.Fatalf("with the cloud port: %q", got)
-	}
-	if err := os.Remove(filepath.Join(os.Getenv("IRONFLOCK_ENV_DIR"), "MY_TCP_PORT_CLOUD.txt")); err != nil {
-		t.Fatal(err)
-	}
-	if got := url(f); got != "tcp://appliance.local:30012" {
-		t.Errorf("after the agent removed the cloud port: %q, want the instance-local URL", got)
-	}
-	writeEnvFiles(t, map[string]string{"MY_TCP_PORT_CLOUD": ""})
-	if got := url(f); got != "tcp://appliance.local:30012" {
-		t.Errorf("with an empty cloud port file: %q", got)
-	}
-
-	// Without the agent's mirror the environment is all there is.
-	f = remoteFlock(t, startEnv)
-	if got := url(f); got != "tcp://app.ironflock.com:31099" {
-		t.Errorf("no mirror: %q", got)
-	}
-	writeEnvFiles(t, map[string]string{"APP_AUTH_ID": "app-20-dev-e1@sn", "APP_AUTH_SECRET": "s"})
-	if got := url(f); got != "tcp://app.ironflock.com:31099" {
-		t.Errorf("a directory without the agent's marker: %q", got)
-	}
-}
-
 // A container that runs as another user than root cannot read the agent's
 // mirror: the URL comes from the start-time environment, and the SDK says so
 // once.
@@ -292,8 +325,8 @@ func TestRemoteAccessURLWarnsOnceWhenTheMirrorIsUnreadable(t *testing.T) {
 	}
 	env.ResetWarning()
 	t.Cleanup(env.ResetWarning)
-	f := remoteFlock(t, map[string]string{"INSTANCE_KEY": "5", "TUNNEL_DOMAIN": "appliance.local", "MY_TCP_PORT": "30012"})
-	writeEnvFiles(t, map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "MY_TCP_PORT_CLOUD": "31099"})
+	f := remoteFlock(t, map[string]string{"TUNNEL_DOMAIN": "appliance.local", "MY_TCP_PORT": "30012"})
+	writeEnvFiles(t, map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "MY_TCP_PORT": "30099"})
 	dir := os.Getenv("IRONFLOCK_ENV_DIR")
 	if err := os.Chmod(dir, 0); err != nil {
 		t.Fatal(err)

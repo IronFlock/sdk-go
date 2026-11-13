@@ -98,58 +98,6 @@ func TestLookupReportsAnUnreadableMirror(t *testing.T) {
 	}
 }
 
-// The agent removes <name>_CLOUD from its mirror when an instance's cloud
-// port goes away; the environment variable still holds the port the
-// container started with, and must not bring it back.
-func TestLookupLiveTrustsTheAgentsMirror(t *testing.T) {
-	t.Setenv("WG_PORT_CLOUD", "31099")
-	cases := []struct {
-		name  string
-		files map[string]string
-		want  string
-	}{
-		{"mirror, file removed", map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "WG_PORT": "30022"}, ""},
-		{"mirror, empty file", map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "WG_PORT_CLOUD": "\n"}, ""},
-		{"mirror, file", map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "WG_PORT_CLOUD": "31100"}, "31100"},
-		{"empty marker", map[string]string{"DEVICE_SERIAL_NUMBER": ""}, ""},
-		{"no mirror, file", map[string]string{"WG_PORT_CLOUD": "31100"}, "31100"},
-		{"no mirror", map[string]string{"APP_AUTH_ID": "app-26-dev-e1@sn"}, "31099"},
-	}
-	for _, c := range cases {
-		mirror(t, c.files)
-		if v, err := LookupLive("WG_PORT_CLOUD"); v != c.want || err != nil {
-			t.Errorf("%s: %q, %v; want %q", c.name, v, err, c.want)
-		}
-	}
-	t.Setenv("IRONFLOCK_ENV_DIR", filepath.Join(t.TempDir(), "missing"))
-	if v, err := LookupLive("WG_PORT_CLOUD"); v != "31099" || err != nil {
-		t.Errorf("no directory: %q, %v", v, err)
-	}
-}
-
-func TestLookupLiveReportsAnUnreadableMirror(t *testing.T) {
-	skipUnlessPermissionsApply(t)
-	t.Setenv("WG_PORT_CLOUD", "31099")
-
-	dir := mirror(t, map[string]string{"DEVICE_SERIAL_NUMBER": "sn", "WG_PORT_CLOUD": "31100"})
-	if err := os.Chmod(filepath.Join(dir, "WG_PORT_CLOUD.txt"), 0); err != nil {
-		t.Fatal(err)
-	}
-	if v, err := LookupLive("WG_PORT_CLOUD"); v != "31099" || !errors.Is(err, fs.ErrPermission) {
-		t.Errorf("unreadable file: %q, %v", v, err)
-	}
-
-	// The agent's own layout for a non-root container: neither the file nor
-	// the marker can be read.
-	dir = mirror(t, map[string]string{"DEVICE_SERIAL_NUMBER": "sn"})
-	if err := os.Chmod(filepath.Join(dir, "DEVICE_SERIAL_NUMBER.txt"), 0); err != nil {
-		t.Fatal(err)
-	}
-	if v, err := LookupLive("WG_PORT_CLOUD"); v != "31099" || !errors.Is(err, fs.ErrPermission) {
-		t.Errorf("unreadable marker: %q, %v", v, err)
-	}
-}
-
 func TestWarnUnreadableLogsOncePerProcess(t *testing.T) {
 	ResetWarning()
 	t.Cleanup(ResetWarning)
