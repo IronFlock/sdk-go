@@ -597,7 +597,7 @@ func newTestLogger() (*slog.Logger, *logBuffer) {
 var platformEnv = []string{
 	"DEVICE_SERIAL_NUMBER", "DEVICE_NAME", "DEVICE_KEY", "APP_NAME", "SWARM_KEY", "APP_KEY", "ENV",
 	"RESWARM_URL", "DEVICE_ENDPOINT_URL", "APP_AUTH_ID", "APP_AUTH_SECRET", "IRONFLOCK_ENV_DIR",
-	"INSTANCE_KEY", "TUNNEL_DOMAIN", "CLOUD_TUNNEL_DOMAIN",
+	"STUDIO_URL", "TUNNEL_DOMAIN",
 }
 
 // unsetEnv unsets names for the duration of the test.
